@@ -7,7 +7,7 @@ from typing import List, Optional
 import pandas as pd
 
 import config
-from storage.models import Trade, Market, Position
+from storage.models import Trade, Market, Position, OnchainFill
 
 # Schema definitions
 SCHEMA_SQL = """
@@ -72,6 +72,26 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_condition_id ON positions(condition_id);
+
+CREATE TABLE IF NOT EXISTS onchain_fills (
+    transaction_hash TEXT NOT NULL,
+    log_index INTEGER NOT NULL,
+    block_number INTEGER NOT NULL,
+    order_hash TEXT NOT NULL,
+    maker TEXT NOT NULL,
+    taker TEXT NOT NULL,
+    maker_asset_id TEXT NOT NULL,
+    taker_asset_id TEXT NOT NULL,
+    maker_amount REAL NOT NULL,
+    taker_amount REAL NOT NULL,
+    fee REAL DEFAULT 0.0,
+    bot_role TEXT NOT NULL,
+    PRIMARY KEY (transaction_hash, log_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_onchain_tx ON onchain_fills(transaction_hash);
+CREATE INDEX IF NOT EXISTS idx_onchain_maker ON onchain_fills(maker);
+CREATE INDEX IF NOT EXISTS idx_onchain_taker ON onchain_fills(taker);
 
 CREATE TABLE IF NOT EXISTS collection_metadata (
     key TEXT PRIMARY KEY,
@@ -460,6 +480,117 @@ class Database:
         FROM trades WHERE activity_type = 'TRADE'
         GROUP BY date(timestamp, 'unixepoch')
         ORDER BY trade_date
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    # --- On-chain fill methods ---
+
+    def upsert_onchain_fills(self, fills: List[OnchainFill]):
+        if not fills:
+            return
+        with self._get_conn() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO onchain_fills
+                   (transaction_hash, log_index, block_number, order_hash,
+                    maker, taker, maker_asset_id, taker_asset_id,
+                    maker_amount, taker_amount, fee, bot_role)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (f.transaction_hash, f.log_index, f.block_number,
+                     f.order_hash, f.maker, f.taker,
+                     f.maker_asset_id, f.taker_asset_id,
+                     f.maker_amount, f.taker_amount, f.fee, f.bot_role)
+                    for f in fills
+                ],
+            )
+
+    def onchain_fill_count(self) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM onchain_fills"
+            ).fetchone()
+            return row["cnt"]
+
+    def onchain_join_summary(self) -> pd.DataFrame:
+        """Join onchain_fills to trades on transaction_hash + asset ID match.
+
+        Returns one row per matched (trade, onchain_fill) pair with bot_role,
+        fee, counterparty address, and trade details.
+        """
+        query = """
+        SELECT
+            t.transaction_hash,
+            t.asset,
+            t.side,
+            t.outcome,
+            t.size,
+            t.price,
+            t.usdc_value,
+            t.timestamp,
+            t.condition_id,
+            o.log_index,
+            o.block_number,
+            o.maker,
+            o.taker,
+            o.maker_asset_id,
+            o.taker_asset_id,
+            o.maker_amount,
+            o.taker_amount,
+            o.fee as onchain_fee,
+            o.bot_role,
+            CASE WHEN o.bot_role = 'maker' THEN o.taker ELSE o.maker END
+                as counterparty
+        FROM trades t
+        INNER JOIN onchain_fills o
+            ON t.transaction_hash = o.transaction_hash
+            AND (t.asset = o.maker_asset_id OR t.asset = o.taker_asset_id)
+        WHERE t.activity_type = 'TRADE'
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    def maker_taker_summary(self) -> pd.DataFrame:
+        """Per-condition_id maker/taker/fee aggregation via joined data."""
+        query = """
+        SELECT
+            t.condition_id,
+            SUM(CASE WHEN o.bot_role = 'maker' THEN 1 ELSE 0 END) as maker_fills,
+            SUM(CASE WHEN o.bot_role = 'taker' THEN 1 ELSE 0 END) as taker_fills,
+            SUM(CASE WHEN o.bot_role = 'maker' THEN t.usdc_value ELSE 0 END)
+                as maker_volume,
+            SUM(CASE WHEN o.bot_role = 'taker' THEN t.usdc_value ELSE 0 END)
+                as taker_volume,
+            SUM(o.fee) as total_fee,
+            COUNT(*) as matched_fills
+        FROM trades t
+        INNER JOIN onchain_fills o
+            ON t.transaction_hash = o.transaction_hash
+            AND (t.asset = o.maker_asset_id OR t.asset = o.taker_asset_id)
+        WHERE t.activity_type = 'TRADE'
+        GROUP BY t.condition_id
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    def counterparty_summary(self) -> pd.DataFrame:
+        """Per-counterparty address aggregation."""
+        query = """
+        SELECT
+            CASE WHEN o.bot_role = 'maker' THEN o.taker ELSE o.maker END
+                as counterparty,
+            COUNT(*) as fills,
+            SUM(t.usdc_value) as volume,
+            COUNT(DISTINCT t.condition_id) as markets,
+            MIN(t.timestamp) as first_seen,
+            MAX(t.timestamp) as last_seen
+        FROM trades t
+        INNER JOIN onchain_fills o
+            ON t.transaction_hash = o.transaction_hash
+            AND (t.asset = o.maker_asset_id OR t.asset = o.taker_asset_id)
+        WHERE t.activity_type = 'TRADE'
+        GROUP BY counterparty
+        ORDER BY volume DESC
         """
         with self._get_conn() as conn:
             return pd.read_sql_query(query, conn)

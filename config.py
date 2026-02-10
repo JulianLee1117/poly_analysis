@@ -32,3 +32,14 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 # Market metadata batch size (for Gamma API condition_ids param)
 MARKET_BATCH_SIZE = 20
+
+# Polygon RPC (on-chain data collection)
+POLYGON_RPC_URL = os.environ.get("POLYGON_RPC_URL", "https://polygon-rpc.com")
+POLYGON_RPC_RATE_LIMIT = float(os.environ.get("POLYGON_RPC_RATE_LIMIT", "2.0"))
+POLYGON_RPC_BURST = 3
+POLYGON_RPC_BATCH_SIZE = 3000  # blocks per eth_getLogs call
+POLYGON_RPC_MAX_RETRIES = 5
+
+# CTF Exchange contracts (Polymarket on Polygon)
+CTF_EXCHANGE_ADDRESS = "0x4bfb41d5b3570DeFd03C39a9A4D8dE6Bd8B8982E"
+NEGRISK_CTF_EXCHANGE_ADDRESS = "0xC5d563A36AE78145C45a50134d48A1215220f80a"

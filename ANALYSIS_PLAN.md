@@ -319,21 +319,62 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
 
 ---
 
-## Data Limitations (No Order Book Snapshots)
+## Phase 8: On-Chain Data Collection & Analysis
 
-**What we have:** 1.3M trade fills with price, size, timestamp, side, outcome per fill. Position resolution data with P&L ground truth. Market metadata.
+**Goal:** Fill 3 of 5 data gaps (maker/taker per fill, fee, counterparty identity) by collecting Polygon CTF Exchange `OrderFilled` events via on-chain data. The bot's `transaction_hash` (100% populated) links to these events.
+
+**Files created:**
+- `collectors/onchain_collector.py` — PolygonRPC client, topic hash auto-discovery, block range binary search, three-pass log collection (bot=maker, bot=taker, OrdersMatched), receipt follow-up, verification
+- `analyzers/maker_taker.py` — Maker/taker split by fills/volume/side/asset/hour/tier, fee analysis, fee-adjusted P&L, maker rebate reconciliation, self-impact re-attribution
+- `analyzers/counterparty.py` — Counterparty universe, HHI/Gini/top-N concentration metrics, repeat opponent analysis, bot vs human classification
+
+**Files modified:**
+- `config.py` — Polygon RPC URL, rate limit, CTF Exchange contract addresses
+- `storage/models.py` — OnchainFill dataclass
+- `storage/database.py` — onchain_fills table, upsert/count/join/summary methods
+- `main.py` — `run_onchain_collection()`, `run_phase8()`, `--skip-onchain` and `--no-receipts` CLI args
+
+**Collection approach:**
+- Auto-discovers OrderFilled topic hash and contract address from a sample tx receipt (no hardcoded keccak256)
+- Binary searches for block range covering all trades (~950K blocks at Polygon's ~2s/block)
+- Three passes via `eth_getLogs` in 3,000-block batches: pass 1 (bot=maker), pass 2 (bot=taker), pass 3 (OrdersMatched + receipt follow-up)
+- Flush to DB every 5,000 records, dedup via `(transaction_hash, log_index)` PK
+- Default 2 req/s for public RPC, configurable via `POLYGON_RPC_URL` env var for paid providers
+
+**Analysis outputs:**
+- Maker/taker classification for every matched fill
+- Per-fill fee amounts ($0 vs actual)
+- Counterparty addresses and competitive landscape
+- Fee-adjusted P&L decomposition (4 components: spread + drag + sell + fees)
+- Self-impact re-attribution split by maker vs taker fills
+- Concentration metrics: HHI, Gini, top-N shares
+- Bot vs human counterparty classification
+
+**Verification:**
+1. Topic hashes auto-discovered from sample tx
+2. Coverage: % of DB trades with on-chain match (expect 95%+)
+3. Decode cross-check: on-chain amounts match DB usdc_value within $0.01
+4. Maker rebate reconciliation: maker_volume × rebate_rate vs $40,704
+5. Fee total sanity: 0-2% of $20.5M volume
+
+---
+
+## Data Limitations (Updated After Phase 8)
+
+**What we have:** 1.3M trade fills with price, size, timestamp, side, outcome per fill. Position resolution data with P&L ground truth. Market metadata. **On-chain OrderFilled events with maker, taker, and fee per fill.**
 
 **What we cannot determine:**
 
 | Missing Signal | Impact | Proxy Available? |
 |---|---|---|
-| Best bid/offer (BBO) at each fill | Cannot measure execution quality vs market | No — `maker_address` empty for all 1.3M trades, `fee` zero for all |
-| Book depth / available liquidity | Cannot assess self-impact vs organic price movement | Partial — intra-market price trajectory (early vs late fills) shows 6.3¢ avg decline, but attribution ambiguous |
-| Maker/taker classification per fill | Cannot determine if bot provides or consumes liquidity on each trade | Partial — $40.7K aggregate maker rebates confirm some making activity, but cannot assign to specific fills |
-| Counterparty identity | Cannot map the competitive landscape | No |
-| Resting order state pre-trade | Cannot assess market selection criteria (did bot pick wide-spread markets?) | Partial — combined VWAP distribution by hour shows spread varies 4.3¢, suggesting market selection does incorporate spread width |
+| Best bid/offer (BBO) at each fill | Cannot measure execution quality vs market | No — would need order book snapshots |
+| Book depth / available liquidity | Cannot assess self-impact vs organic price movement | Partial — intra-market price trajectory + maker/taker split from Phase 8 |
+| ~~Maker/taker classification per fill~~ | ~~Cannot determine if bot provides or consumes liquidity~~ | **RESOLVED by Phase 8** — on-chain OrderFilled events |
+| ~~Counterparty identity~~ | ~~Cannot map competitive landscape~~ | **RESOLVED by Phase 8** — on-chain maker/taker addresses |
+| ~~Fee per fill~~ | ~~Cannot compute actual fee drag~~ | **RESOLVED by Phase 8** — on-chain fee field |
+| Resting order state pre-trade | Cannot assess market selection criteria | Partial — combined VWAP distribution by hour shows spread varies 4.3¢ |
 
-**Why this doesn't block the analysis:** The core reverse-engineering question — "what strategy does this bot use and how profitable is it?" — is fully answerable from trade + position data. Completeness arbitrage profitability, directional tilt, sell discipline, temporal patterns, and P&L decomposition are all derivable. The order book gap only limits claims about *execution quality* (which we reframe as *execution patterns*) and *competitive dynamics*.
+**Phase 8 closes 3 of 5 data gaps** from a single public source (Polygon RPC, no API key required).
 
 ---
 
@@ -360,8 +401,9 @@ All analyzers must handle 1.3M trades without loading the full dataset into memo
 | Open positions | COMPLETE | 21 | Currently active positions |
 | Closed positions | COMPLETE | 26,310 | P&L ground truth: $713K realized |
 | Maker rebates | COMPLETE | 34 | $40,704 total rebates |
+| On-chain fills | PENDING | — | OrderFilled events from Polygon CTF Exchange |
 
-**All data collected.** Database: 762 MB, WAL checkpointed. Ready for Phase 3 analysis.
+**API data collected.** On-chain data pending first run. Database: 762 MB, WAL checkpointed.
 
 ---
 

@@ -178,10 +178,44 @@ def run_phase7(db: Database, phase3: dict, phase4: dict,
     return {'synthesis': synthesis, 'report_path': report_path}
 
 
+def run_onchain_collection(db: Database, wallet: str,
+                           skip_onchain: bool = False,
+                           no_receipts: bool = False):
+    """Collect on-chain OrderFilled events from Polygon."""
+    if skip_onchain:
+        count = db.onchain_fill_count()
+        print(f"\nSkipping on-chain collection (--skip-onchain)")
+        print(f"  Existing on-chain fills: {count:,}")
+        return
+
+    from collectors.onchain_collector import collect_onchain
+    collect_onchain(db, bot_address=wallet, skip_receipts=no_receipts)
+
+
+def run_phase8(db: Database, phase3: dict, phase4: dict):
+    """Phase 8: On-chain analysis (maker/taker + counterparties)."""
+    from analyzers.maker_taker import analyze_maker_taker
+    from analyzers.counterparty import analyze_counterparties
+
+    print("\n" + "#" * 60)
+    print("# PHASE 8: ON-CHAIN MAKER/TAKER & COUNTERPARTY ANALYSIS")
+    print("#" * 60)
+
+    completeness = phase3['completeness']
+    structure = phase3['structure']
+
+    maker_taker = analyze_maker_taker(db, completeness, structure)
+    counterparties = analyze_counterparties(db)
+
+    return {'maker_taker': maker_taker, 'counterparties': counterparties}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Polymarket bot analysis pipeline")
     parser.add_argument("--wallet", default=config.WALLET_ADDRESS, help="Wallet address to analyze")
     parser.add_argument("--skip-fetch", action="store_true", help="Skip data collection, use existing DB")
+    parser.add_argument("--skip-onchain", action="store_true", help="Skip on-chain data collection")
+    parser.add_argument("--no-receipts", action="store_true", help="Skip Pass 3 receipt fetches")
     args = parser.parse_args()
 
     os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -220,6 +254,18 @@ def main():
     phase7_start = time.time()
     run_phase7(db, phase3, phase4, phase5, phase6)
     print(f"\nPhase 7 completed in {time.time() - phase7_start:.1f}s")
+
+    # On-chain data collection
+    onchain_start = time.time()
+    run_onchain_collection(db, wallet=args.wallet,
+                           skip_onchain=args.skip_onchain,
+                           no_receipts=args.no_receipts)
+    print(f"\nOn-chain collection completed in {time.time() - onchain_start:.1f}s")
+
+    # Phase 8: On-chain analysis
+    phase8_start = time.time()
+    phase8 = run_phase8(db, phase3, phase4)
+    print(f"\nPhase 8 completed in {time.time() - phase8_start:.1f}s")
 
 
 if __name__ == "__main__":

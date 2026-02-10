@@ -41,6 +41,22 @@ class Market:
 
 
 @dataclass
+class OnchainFill:
+    transaction_hash: str
+    log_index: int
+    block_number: int
+    order_hash: str
+    maker: str
+    taker: str
+    maker_asset_id: str  # uint256 as decimal string (matches trades.asset)
+    taker_asset_id: str
+    maker_amount: float  # divided by 1e6
+    taker_amount: float  # divided by 1e6
+    fee: float  # divided by 1e6
+    bot_role: str  # 'maker' or 'taker'
+
+
+@dataclass
 class Position:
     asset: str  # token ID
     condition_id: str
