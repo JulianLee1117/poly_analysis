@@ -8,7 +8,7 @@
 2. **Gamma API uses `clob_token_ids` (array format), NOT `condition_ids`.** The `condition_ids` param does fuzzy matching and returns wrong results.
 3. **Closed-positions API caps at 50/page.** Must paginate with offset. No upper offset limit.
 4. **Outcomes are "Up" and "Down", NOT "Yes" and "No".** These are crypto 15-min direction markets.
-5. **P&L ground truth is $713,043** from closed-positions `realized_pnl`. But **trade-derived P&L is only $281K** for 8,310 resolved markets. The $432K gap is from 5,229 pre-Jan-19 condition_ids that have positions but no trade data. (Prior $319K figure had survivorship bias — excluded one-sided losers.)
+5. **P&L ground truth is $713,043** from closed-positions `realized_pnl`. Trade-derived P&L is $281K for 8,310 resolved markets. The $432K gap decomposes: $254K from 5,587 pre-trade-window condition_ids + $178K methodological difference on overlapping markets (position API uses different avg_price than trade VWAP). (Prior $319K figure had survivorship bias — excluded one-sided losers.)
 6. **The bot is NOT purely a taker.** $40,704 in maker rebates is real revenue. But `maker_address` is empty and `fee` is zero for ALL 1.3M trades — cannot classify maker/taker per fill.
 7. **Position condition_ids (13,543) > trade condition_ids (8,314).** The wallet has history predating our trade window.
 8. **Combined VWAP of $0.925 is misleading.** Only 32.4% of markets are well-balanced (shares within 20%). 27.7% have combined VWAP > $1.00 (timing mismatch, not error). Well-balanced markets: $0.940 combined. Must always tier by balance ratio.
@@ -31,6 +31,13 @@
 25. **Bot is scaling up over 22 days** (+82% daily buy volume, first week $569K → last week $1.03M). Peak concurrent exposure $292K, peak concurrent markets 113.
 26. **Edge capture efficiency is entirely determined by balance.** Well-balanced markets: 59% mean capture, +$159 avg P&L. Very imbalanced: -124% capture, -$23 avg P&L.
 27. **Market volume is NEGATIVELY associated with balance after controlling for fills** (β=-0.020, t=-8.3). Higher-volume markets have worse balance. Possible explanation: competitive pressure from other bots sweeping the same liquidity.
+28. **P&L decomposition is algebraically exact.** Three components sum to trade_pnl with $0.000 max per-market error: (1) completeness spread = matched_pairs × (1 - combined_VWAP), (2) directional drag = unmatched × (resolution_price - excess_VWAP), (3) sell P&L = sell_proceeds - sell_shares × buy_VWAP per side. The decomposition values sold shares at their buy VWAP, creating a clean partition of total buy cost.
+29. **Sell P&L requires two-layer framing: accounting loss vs economic impact.** Accounting sell loss is -$547K (57% of spread), but sell discipline offsets +$126K, giving net sell drag of -$421K (44% of spread). Directional drag from imbalance is -$134K (14%, no offset). Replication priority: (1) balance optimization via fills/depth (reduces BOTH drag and sell need), (2) sell timing refinement (reduces net sell drag). Selling is economically rational — 72% of sell-markets benefit.
+30. **Hold-to-resolution counterfactual: $155K.** Without any sells, P&L drops from $281K to $155K. The $126K sell discipline value = sell_proceeds ($2.21M) - sold winning shares forfeited ($2.08M). Selling losers at $0.29 saves more than selling winners at $0.34 forfeits, because the 2.5:1 loser:winner sell ratio exceeds the breakeven ratio of 2.3:1.
+31. **Reconciliation: `total_bought` is SHARES (proven algebraically).** Definitive test on 21,821 no-sell positions: `realized_pnl = total_bought × (cur_price - avg_price)` produces median residual $0.0000 (79% exact to $0.01). The USDC hypothesis (`pnl = total_bought × (cur_price/avg_price - 1)`) gives median residual $384 (0% exact). For losers, `pnl/total_bought` clusters at -0.29 (= -avg_price), not -1.0. With this proven, the fill gap is ~6% (pos/trade shares median 1.06), not the original "2.4x." The $178K P&L gap (position $459K vs trade $281K) is methodological (different avg_price), not missing fills.
+32. **Bitcoin dominates P&L but this is from market depth, not an intrinsic BTC property.** BTC: $181K, 34% capture, 60% win rate. ETH: $71K, 27%. SOL: $19K, 18%. XRP: $10K, 17%. BTC/ETH have deeper books → more fills → better balance → higher capture. Phase 4 OLS: is_btc_eth t=-1.4 (not significant after controlling for fills). For replication: target depth, not asset.
+33. **Sharpe 18 annualized is resolution-based, not mark-to-market.** P&L recognized at market close, so open-position exposure is invisible. High Sharpe confirms consistent arb execution, but does NOT indicate low real-time risk. More practical metric: max drawdown / peak exposure = ~4% (-$12K / $292K). 84% of days profitable. Calmar 375.
+34. **Win rate 53.6% at market level** (4,259/7,945 both-sided). Well-balanced markets: 61.5% win, avg +$69. Very imbalanced: 36.8% win, avg -$38. Profit factor 1.31.
 
 ---
 
@@ -265,7 +272,81 @@ Fill count has strong independent predictive power for balance quality (r=+0.48 
 
 ---
 
-## Phase 5: P&L and Performance — PENDING
+## Phase 5: P&L and Performance — COMPLETE
+
+### Files created
+- `analyzers/pnl.py` — P&L decomposition, reconciliation, sell counterfactual, win/loss stats, by-asset, daily P&L
+- `analyzers/risk.py` — Sharpe, drawdown, Calmar, loss streaks, tail risk, capital efficiency
+- `database.py` addition: `position_pnl_by_condition()` — per-condition_id P&L from positions table
+
+### Key findings
+
+**P&L decomposition (exact, error $0.000):**
+| Component | Amount | % of Spread |
+|-----------|--------|------------|
+| 1. Completeness spread | +$962,452 | 100% (theoretical) |
+| 2. Directional drag | -$134,105 | 13.9% |
+| 3. Sell P&L | -$547,366 | 56.9% |
+| **Trade-derived total** | **+$280,981** | **29.2%** |
+| Maker rebates (separate) | +$40,704 | 4.2% |
+
+**Directional drag breakdown:**
+- Excess on winner: 3,286 markets, +$865K (bonus profit)
+- Excess on loser: 4,659 markets, -$999K (loss)
+- By tier: well-balanced -$3K, moderate -$55K, imbalanced -$40K, very imbalanced -$36K
+
+**Sell discipline counterfactual:**
+- Hold-to-resolution P&L: $155,250
+- Actual P&L (with sells): $280,981
+- Sell discipline value: +$125,731 → selling IMPROVED returns
+- Per-market: 72% of sell-markets benefited, 28% were hurt
+- Winning shares sold: 2.08M (forfeited resolution payout)
+- Losing shares sold: 5.31M (avoided worthless holds)
+
+**Reconciliation (trade-derived vs position-derived):**
+- 7,945 overlapping markets: trade $281K vs position $459K ($178K gap)
+- `total_bought` is SHARES (proven): algebraic test on 21,821 no-sell positions — shares hypothesis median residual $0.0000 (79% exact), USDC hypothesis $384 (0% exact)
+- Fill gap ~6% (pos/trade shares median 1.06), not the original "2.4x" (which was shares÷USDC)
+- P&L gap is methodological (position API uses different avg_price), not missing fills
+- Pre-trade-window P&L: $254K (5,587 condition_ids)
+- Position ground truth total: $713,043
+
+**Net sell drag framing:**
+- Accounting sell loss: -$547K (57% of spread)
+- Sell discipline offset: +$126K (selling improved vs hold)
+- Net sell drag: -$421K (44% of spread — the avoidable portion)
+- Directional drag: -$134K (14%, no offset — pure balance cost)
+- Replication priority: (1) balance/depth, (2) sell timing
+
+**Risk metrics:**
+- Sharpe: 18 annualized — RESOLUTION-BASED, not mark-to-market (confirms consistent arb, not low real-time risk)
+- Max drawdown: -$12,378
+- Drawdown / peak exposure: ~4% (-$12K / $292K) — more practical risk metric
+- Calmar: 375
+- Max loss streak: 15 consecutive markets
+- Max win streak: 19 consecutive markets
+- Tail: p5 = -$557, p1 = -$1,554
+- Capital efficiency: 733% trade P&L / avg exposure
+
+**By-asset P&L:**
+| Asset | P&L | Win Rate | Capture |
+|-------|-----|----------|---------|
+| Bitcoin | +$180,680 | 60.3% | 34% |
+| Ethereum | +$71,130 | 54.5% | 27% |
+| Solana | +$19,430 | 46.4% | 18% |
+| XRP | +$9,742 | 49.9% | 17% |
+
+**Daily P&L (56 days, all positions):**
+- Avg: $12,733/day, 84% of days profitable
+- Best day: $49,009, Worst day: -$12,378
+- First week: $259, Last week: $167,642 (scaling up)
+
+### Decisions made
+- **Reused resolved_df from completeness.py** — no P&L recomputation. Added decomposition columns only.
+- **Three-component decomposition** uses buy-only VWAPs to value all share categories (matched, held unmatched, sold). Algebraically exact partition of total buy cost.
+- **Position-level daily P&L** uses close_timestamp for timing (when markets resolved). Covers all 13,532 condition_ids for the full $713K cumulative curve.
+- **Capital efficiency** uses trade-derived P&L against trade-window exposure (apples to apples), not position P&L against partial exposure.
+- **Reconciliation discrepancy investigated and proven.** Algebraic test on 21,821 no-sell positions definitively shows `total_bought` is shares (residual $0.0000) not USDC (residual $384). Fill gap ~6%, P&L gap ($178K) is methodological. Trade decomposition covers ~94% of fills.
 
 ---
 

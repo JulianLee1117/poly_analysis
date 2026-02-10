@@ -126,6 +126,25 @@ def run_phase4(db: Database, phase3_result: dict):
     return {'execution': execution, 'sizing': sizing}
 
 
+def run_phase5(db: Database, phase3_result: dict, phase4_result: dict):
+    """Phase 5: P&L Decomposition & Risk Metrics."""
+    from analyzers.pnl import analyze_pnl
+    from analyzers.risk import analyze_risk
+
+    print("\n" + "#" * 60)
+    print("# PHASE 5: P&L DECOMPOSITION & RISK METRICS")
+    print("#" * 60)
+
+    completeness = phase3_result['completeness']
+    structure = phase3_result['structure']
+    sizing = phase4_result['sizing']
+
+    pnl = analyze_pnl(db, completeness, structure)
+    risk = analyze_risk(pnl, sizing)
+
+    return {'pnl': pnl, 'risk': risk}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Polymarket bot analysis pipeline")
     parser.add_argument("--wallet", default=config.WALLET_ADDRESS, help="Wallet address to analyze")
@@ -151,8 +170,13 @@ def main():
 
     # Phase 4: Execution Microstructure
     phase4_start = time.time()
-    run_phase4(db, phase3)
+    phase4 = run_phase4(db, phase3)
     print(f"\nPhase 4 completed in {time.time() - phase4_start:.1f}s")
+
+    # Phase 5: P&L Decomposition & Risk
+    phase5_start = time.time()
+    run_phase5(db, phase3, phase4)
+    print(f"\nPhase 5 completed in {time.time() - phase5_start:.1f}s")
 
 
 if __name__ == "__main__":

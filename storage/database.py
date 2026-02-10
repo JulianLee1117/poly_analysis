@@ -344,6 +344,26 @@ class Database:
         with self._get_conn() as conn:
             return pd.read_sql_query(query, conn)
 
+    def position_pnl_by_condition(self) -> pd.DataFrame:
+        """Per-condition_id P&L from positions table (ground truth).
+
+        Sums realized_pnl across outcomes (Up/Down) per condition_id.
+        Uses close_timestamp for P&L timing (when market resolved).
+        """
+        query = """
+        SELECT
+            condition_id,
+            SUM(realized_pnl) as position_pnl,
+            MAX(close_timestamp) as close_ts,
+            COUNT(*) as position_count,
+            SUM(total_bought) as total_bought
+        FROM positions
+        WHERE is_closed = 1
+        GROUP BY condition_id
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
     def market_fills(self, condition_id: str) -> pd.DataFrame:
         """All fills for a single market, ordered by timestamp."""
         with self._get_conn() as conn:
