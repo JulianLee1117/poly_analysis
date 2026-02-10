@@ -180,11 +180,18 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
                            if symmetric_count > 0 else float('nan'))
     sym_null_acc = (symmetric['null_correct'].mean()
                     if symmetric_count > 0 else float('nan'))
-    # z-test: gross share tilt vs subset's own null (not 50%)
+    # z-test: gross share tilt vs agreement-adjusted null.
+    # E[acc] = agreement * null + (1 - agreement) * (1 - null)
+    # accounts for noise flipping which side has more shares.
     if symmetric_count > 0 and 0 < sym_null_acc < 1:
-        sym_se = np.sqrt(sym_null_acc * (1 - sym_null_acc) / symmetric_count)
-        symmetric_z = (symmetric_gross_acc - sym_null_acc) / sym_se
+        sym_agreement = (symmetric['gross_share_excess'] == symmetric['cheaper_side']).mean()
+        sym_expected_acc = (sym_agreement * sym_null_acc
+                           + (1 - sym_agreement) * (1 - sym_null_acc))
+        sym_se = np.sqrt(sym_expected_acc * (1 - sym_expected_acc) / symmetric_count)
+        symmetric_z = (symmetric_gross_acc - sym_expected_acc) / sym_se
     else:
+        sym_agreement = float('nan')
+        sym_expected_acc = float('nan')
         symmetric_z = float('nan')
 
     # Dollar allocation: per-market fraction spent on Up
@@ -198,19 +205,50 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
     dollar_frac_std = both_resolved['actual_up_dollar_frac'].std()
 
     # Dollar allocation conditional on outcome.
-    # Raw gap is biased: when Up wins, Up tends to be expensive, so equal-shares
-    # buying mechanically puts more dollars on Up. Must compare actual gap to
-    # price-implied gap (what an equal-shares, no-prediction buyer would produce).
-    # Prediction only if actual gap > implied gap.
+    # Raw gap is biased even for an equal-dollar buyer: allocation noise
+    # correlates with price structure. Permutation test gives the true null:
+    # shuffle outcome labels (preserving allocations and prices), recompute
+    # gap 10K times.
     up_won = both_resolved[both_resolved['winning_outcome'] == 'Up']
     down_won = both_resolved[both_resolved['winning_outcome'] == 'Down']
     dollar_frac_up_wins = up_won['actual_up_dollar_frac'].mean()
     dollar_frac_down_wins = down_won['actual_up_dollar_frac'].mean()
     dollar_frac_gap = dollar_frac_up_wins - dollar_frac_down_wins
+
+    # Equal-shares baseline (reference only — wrong null for equal-dollar buyer)
     price_frac_up_wins = up_won['price_implied_up_frac'].mean()
     price_frac_down_wins = down_won['price_implied_up_frac'].mean()
     implied_gap = price_frac_up_wins - price_frac_down_wins
-    excess_gap = dollar_frac_gap - implied_gap
+
+    # Stratified permutation test: shuffle outcome labels WITHIN price bins.
+    # Unstratified shuffle breaks the price-outcome correlation (expensive side
+    # wins ~83% in momentum markets), giving null mean ≈ 0 and a false positive.
+    # Stratifying by price_implied_up_frac preserves the price-outcome link
+    # while breaking any allocation-outcome prediction signal.
+    n_perms = 10_000
+    rng = np.random.default_rng(42)
+    frac_values = both_resolved['actual_up_dollar_frac'].values
+    price_frac = both_resolved['price_implied_up_frac'].values
+    outcomes_up = (both_resolved['winning_outcome'] == 'Up').values
+
+    # Quantile bins by price structure (20 bins, ~400 markets each)
+    n_bins = 20
+    bin_edges = np.percentile(price_frac, np.linspace(0, 100, n_bins + 1))
+    bin_edges[0] -= 0.001
+    bin_edges[-1] += 0.001
+    bin_idx = np.digitize(price_frac, bin_edges) - 1
+    bin_masks = [np.where(bin_idx == b)[0] for b in range(n_bins)]
+
+    perm_gaps = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = outcomes_up.copy()
+        for bm in bin_masks:
+            if len(bm) > 1:
+                shuffled[bm] = rng.permutation(shuffled[bm])
+        perm_gaps[i] = frac_values[shuffled].mean() - frac_values[~shuffled].mean()
+    perm_mean = perm_gaps.mean()
+    perm_std = perm_gaps.std()
+    perm_p = (perm_gaps >= dollar_frac_gap).mean()
 
     # ── Print findings ──
     print("\n" + "=" * 60)
@@ -254,24 +292,28 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
     print(f"    Gross-null agreement: {gross_null_agreement*100:.1f}% of markets")
     print(f"  Symmetric subset (|VWAP gap| < 5c, n={symmetric_count:,}):")
     if symmetric_count > 0:
-        print(f"    Subset null (cheaper wins): {sym_null_acc*100:.1f}%")
+        print(f"    Cheaper-side win rate: {sym_null_acc*100:.1f}%")
+        print(f"    Agreement (excess=cheaper): {sym_agreement*100:.1f}%")
+        print(f"    Adjusted expected acc: {sym_expected_acc*100:.1f}%")
         print(f"    Gross share tilt: {symmetric_gross_acc*100:.1f}%  "
-              f"(z={symmetric_z:+.2f} vs subset null)")
+              f"(z={symmetric_z:+.2f} vs adjusted null)")
         print(f"    Net share tilt:   {symmetric_net_acc*100:.1f}%")
     print(f"  Dollar allocation conditional on outcome:")
-    print(f"    Actual:        Up wins {dollar_frac_up_wins:.4f} / "
-          f"Down wins {dollar_frac_down_wins:.4f}  (gap {dollar_frac_gap:+.4f})")
-    print(f"    Price-implied: Up wins {price_frac_up_wins:.4f} / "
-          f"Down wins {price_frac_down_wins:.4f}  (gap {implied_gap:+.4f})")
-    print(f"    Excess gap: {excess_gap:+.4f} (actual - implied; >0 = prediction)")
+    print(f"    Observed gap: {dollar_frac_gap:+.4f}  "
+          f"(Up wins {dollar_frac_up_wins:.4f} / Down wins {dollar_frac_down_wins:.4f})")
+    print(f"    Stratified perm null: mean {perm_mean:+.4f} (std {perm_std:.4f}), "
+          f"{n_perms:,} shuffles")
+    print(f"    p-value: {perm_p:.4f} (one-tailed)")
+    print(f"    [Equal-shares ref: gap {implied_gap:+.4f} — "
+          f"bot at {dollar_frac_gap/implied_gap*100:.0f}% of equal-shares level]"
+          if implied_gap > 0 else "")
     print(f"  Overall dollar alloc: mean Up frac {dollar_frac_mean:.4f} "
           f"(std {dollar_frac_std:.4f})")
     has_sym = symmetric_count >= 100
     # One-tailed: only flag prediction if bot does BETTER than null (z > 1.96).
-    # Negative z = anti-prediction (consistent with equal-dollar buying noise).
     sym_predicts = has_sym and symmetric_z > 1.96
-    # Prediction only if actual gap exceeds price-implied gap.
-    dollar_predicts = excess_gap > 0.01
+    # Permutation: prediction if observed gap significantly exceeds null.
+    dollar_predicts = perm_p < 0.05
     if not has_sym:
         conclusion = "Inconclusive (insufficient symmetric markets)"
     elif sym_predicts or dollar_predicts:
@@ -323,11 +365,14 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
             'symmetric_gross': float(symmetric_gross_acc),
             'symmetric_net': float(symmetric_net_acc),
             'symmetric_null': float(sym_null_acc),
+            'symmetric_agreement': float(sym_agreement),
+            'symmetric_expected': float(sym_expected_acc),
             'symmetric_count': symmetric_count,
             'symmetric_z': float(symmetric_z),
             'dollar_frac_gap': float(dollar_frac_gap),
-            'implied_gap': float(implied_gap),
-            'excess_gap': float(excess_gap),
+            'perm_null_mean': float(perm_mean),
+            'perm_null_std': float(perm_std),
+            'perm_p_value': float(perm_p),
         },
         'summary': {
             'both_sided_count': len(both),
@@ -348,8 +393,8 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
             'dollar_frac_mean': float(dollar_frac_mean),
             'dollar_frac_std': float(dollar_frac_std),
             'dollar_frac_gap': float(dollar_frac_gap),
-            'implied_gap': float(implied_gap),
-            'excess_gap': float(excess_gap),
+            'perm_null_mean': float(perm_mean),
+            'perm_p_value': float(perm_p),
             'sell_recovery_pct': (float(sell_proceeds_total / sell_market_buy_cost)
                                   if sell_market_buy_cost > 0 else 0),
         }
