@@ -201,16 +201,34 @@ def analyze_execution(db: Database, pms: pd.DataFrame,
     traj_both = traj_both.copy()
     traj_both['fill_tercile'] = fill_tercile
 
-    print(f"  Drift by fill count (self-impact proxy):")
+    # Per-fill drift normalization: random walk expects |drift| ∝ √n,
+    # so |drift|/fill ∝ 1/√n (decreasing). If drift/fill is constant or
+    # increasing with fill count → genuine self-impact beyond random walk.
+    print(f"  Drift by fill count (self-impact test):")
+    print(f"    {'tier':4s} {'n':>6s}  {'avg fills':>9s}  "
+          f"{'|drift|':>8s}  {'|drift|/fill':>12s}  {'range':>8s}")
+    drift_per_fill_by_tier = {}
     for tercile in ['low', 'mid', 'high']:
         sub = traj_both[traj_both['fill_tercile'] == tercile]
         if len(sub) > 0:
-            # Absolute drift captures movement regardless of direction
             abs_drift = (sub['drift_up'].abs().mean() + sub['drift_down'].abs().mean()) / 2
-            print(f"    {tercile:4s} fills (n={len(sub):,}): "
-                  f"avg |drift| ${abs_drift:.4f}, "
-                  f"avg range Up ${sub['range_up'].mean():.3f} / "
-                  f"Down ${sub['range_down'].mean():.3f}")
+            avg_fills = sub['total_buy_fills'].mean()
+            dpf_up = (sub['drift_up'].abs() / sub['up_buy_fills'].clip(lower=1)).mean()
+            dpf_down = (sub['drift_down'].abs() / sub['down_buy_fills'].clip(lower=1)).mean()
+            dpf = (dpf_up + dpf_down) / 2
+            avg_range = (sub['range_up'].mean() + sub['range_down'].mean()) / 2
+            drift_per_fill_by_tier[tercile] = dpf
+            print(f"    {tercile:4s} {len(sub):6,}  {avg_fills:9.0f}  "
+                  f"${abs_drift:.4f}  ${dpf:.6f}  ${avg_range:.3f}")
+    if 'low' in drift_per_fill_by_tier and 'high' in drift_per_fill_by_tier:
+        dpf_ratio = drift_per_fill_by_tier['high'] / drift_per_fill_by_tier['low']
+        if dpf_ratio > 1.1:
+            verdict = f"INCREASING ({dpf_ratio:.2f}x) — evidence of self-impact"
+        elif dpf_ratio < 0.9:
+            verdict = f"DECREASING ({dpf_ratio:.2f}x) — consistent with random walk"
+        else:
+            verdict = f"FLAT ({dpf_ratio:.2f}x) — borderline"
+        print(f"    Drift/fill trend: {verdict}")
 
     # ── 5. Sell execution patterns ──
     has_sells = df[df['first_sell_ts'].notna()].copy()
@@ -241,13 +259,27 @@ def analyze_execution(db: Database, pms: pd.DataFrame,
               f"Up {has_sells['sell_up_fills'].sum():,} / "
               f"Down {has_sells['sell_down_fills'].sum():,}")
 
-        # Does selling improve or worsen balance?
-        # Compare balance ratio for markets with sells vs without
+        # Does selling improve balance? Two tests:
+        # (1) Cross-market (CONFOUNDED by selection — sell-markets are higher-fill)
         no_sells = df[df['first_sell_ts'].isna()]
         bal_with_sells = has_sells['balance_ratio'].mean()
         bal_without = no_sells['balance_ratio'].mean()
-        print(f"  Balance with sells: {bal_with_sells:.4f} vs "
-              f"without: {bal_without:.4f}")
+        print(f"  Cross-market balance: sell-markets {bal_with_sells:.4f} vs "
+              f"no-sell {bal_without:.4f} (selection-biased)")
+
+        # (2) Within-market (CLEAN): compare gross (pre-sell) vs net (post-sell)
+        #     balance in the SAME markets. Isolates the causal effect of selling.
+        gross_max = has_sells[['buy_up_shares', 'buy_down_shares']].max(axis=1)
+        gross_min = has_sells[['buy_up_shares', 'buy_down_shares']].min(axis=1)
+        has_sells['gross_balance'] = np.where(
+            gross_max > 0, gross_min / gross_max, 0)
+        gross_bal = has_sells['gross_balance'].mean()
+        net_bal = has_sells['balance_ratio'].mean()
+        delta = net_bal - gross_bal
+        print(f"  Within-market: pre-sell {gross_bal:.4f} → "
+              f"post-sell {net_bal:.4f} "
+              f"({'improved' if delta > 0.001 else 'worsened' if delta < -0.001 else 'unchanged'}"
+              f" by {abs(delta):.4f})")
 
         # Sell side vs excess side: does bot sell the excess (rebalancing) or short side (worsening)?
         has_sells['more_sell_side'] = np.where(
@@ -271,20 +303,26 @@ def analyze_execution(db: Database, pms: pd.DataFrame,
         traj_merge = traj_merge.reset_index()
         df_corr = df_corr.merge(traj_merge, on='condition_id', how='left')
 
+    # Add market volume as book depth proxy
+    vol_map = markets.set_index('condition_id')['volume']
+    df_corr['market_volume'] = df_corr['condition_id'].map(vol_map)
+
     correlates = [
         ('seq_gap', 'Sequencing gap'),
         ('entry_speed', 'Entry speed'),
         ('total_fills', 'Total fills'),
         ('exec_duration', 'Exec duration'),
+        ('market_volume', 'Market volume'),
     ]
 
+    print(f"  Bivariate (each potentially confounded):")
     for col, label in correlates:
         if col in df_corr.columns:
             valid_c = df_corr[df_corr[col].notna() & df_corr['balance_ratio'].notna()]
             if len(valid_c) > 30:
                 r, p = stats.spearmanr(valid_c[col], valid_c['balance_ratio'])
                 sig = '*' if p < 0.01 else ''
-                print(f"  {label:20s}: r={r:+.4f}  p={p:.2e} {sig}")
+                print(f"    {label:20s}: r={r:+.4f}  p={p:.2e} {sig}")
 
     # Fill count vs balance by tier
     df['fill_count_tier'] = pd.qcut(df['total_fills'], 4,
@@ -312,6 +350,62 @@ def analyze_execution(db: Database, pms: pd.DataFrame,
     for dur, row in dur_balance.iterrows():
         label = '15-min' if dur == 900 else 'Hourly'
         print(f"    {label:12s}: {row['mean']:.4f}  (n={int(row['count']):,})")
+
+    # ── 7. Multivariate decomposition ──
+    # Bivariate correlations are confounded: fill count, duration, asset,
+    # market duration are all correlated (deeper markets → more fills AND
+    # better balance). OLS separates independent effects.
+    df_reg = df_asset.copy()
+    df_reg['seq_gap'] = df_reg['condition_id'].map(seq_gap_map)
+    df_reg['log_fills'] = np.log1p(df_reg['total_fills'])
+    df_reg['is_hourly'] = (df_reg['market_duration'] == 3600).astype(float)
+    df_reg['is_btc_eth'] = df_reg['crypto_asset'].isin(
+        ['Bitcoin', 'Ethereum']).astype(float)
+    df_reg['log_volume'] = np.log1p(df_reg['condition_id'].map(vol_map))
+
+    features = ['log_fills', 'is_hourly', 'is_btc_eth', 'seq_gap', 'log_volume']
+    target = 'balance_ratio'
+    reg_data = df_reg[features + [target]].dropna()
+
+    X = reg_data[features].values
+    X = np.column_stack([np.ones(len(X)), X])
+    y = reg_data[target].values
+
+    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    y_hat = X @ beta
+    ss_res = np.sum((y - y_hat) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r_sq = 1 - ss_res / ss_tot
+    n_reg, k_reg = X.shape
+    sigma_sq = ss_res / (n_reg - k_reg)
+    try:
+        cov = sigma_sq * np.linalg.inv(X.T @ X)
+        se = np.sqrt(np.diag(cov))
+        t_stats = beta / se
+    except np.linalg.LinAlgError:
+        se = np.full(k_reg, np.nan)
+        t_stats = np.full(k_reg, np.nan)
+
+    print(f"\n  Multivariate OLS: balance ~ features "
+          f"(n={n_reg:,}, R²={r_sq:.3f})")
+    feature_names = ['intercept'] + features
+    for i, fname in enumerate(feature_names):
+        sig = '*' if abs(t_stats[i]) > 2.576 else ''
+        print(f"    {fname:15s}: β={beta[i]:+.5f}  "
+              f"se={se[i]:.5f}  t={t_stats[i]:+6.2f} {sig}")
+
+    # Interpretation helper
+    sig_factors = [
+        feature_names[i] for i in range(1, len(feature_names))
+        if abs(t_stats[i]) > 2.576
+    ]
+    if sig_factors:
+        print(f"    Significant (|t|>2.58): {', '.join(sig_factors)}")
+    print(f"    Note: log_volume (lifetime traded volume) is a poor proxy for")
+    print(f"    instantaneous book depth. log_fills retaining t={t_stats[1]:+.1f}")
+    print(f"    after this control suggests some independent causal role")
+    print(f"    (more fills = more rebalancing chances), but confounding")
+    print(f"    with unmeasured depth cannot be fully ruled out.")
 
     return {
         'sequencing_df': seq,

@@ -23,13 +23,14 @@
 15. **Spreads EXPANDED over 22 days** (+5.34¢). First week 4.3¢, last week 9.6¢. Opposite of expected competition-driven compression. Investigate in Phase 6.
 16. **When determining market resolution, use BOTH cur_price=0 and cur_price=1.** Using only cur_price=1 creates survivorship bias on one-sided markets (misses losers whose only position resolved to 0).
 19. **12% of markets are hourly, not 15-min.** 7,309 markets have "7:45AM-8:00AM" format (900s), 1,004 have "6PM" format (3600s). Market open = end_date minus duration. Use `_parse_market_duration()` in execution.py.
-20. **Fill count is the primary driver of balance quality** (r=+0.48, p≈0). Sequencing gap is weak (r=-0.15). Entry speed barely matters (r=-0.10). The execution bottleneck is liquidity depth, not timing.
-21. **BTC/ETH have better balance (0.71-0.72) than SOL/XRP (0.54-0.58).** Likely reflects order book depth differences. XRP worst at 0.54.
-22. **Hourly markets have better balance (0.79) than 15-min (0.63).** More time to accumulate both sides.
-23. **Markets with sells have BETTER balance (0.74 vs 0.60).** Sells improve balance indirectly — by cutting losers that often become the excess position. But sells don't specifically target the excess side (48.6%, near 50%).
-24. **Self-impact is real.** High-fill markets have 2.2x the absolute price drift of low-fill markets ($0.31 vs $0.14). Cannot attribute definitively without order book data, but the fill-count gradient is strong evidence.
+20. **Fill count has strong independent predictive power for balance** (r=+0.48 bivariate, t=41.5 in OLS controlling for log_volume). Multivariate OLS (R²=0.262): `log_fills` β=+0.127 (t=41.5), `is_hourly` β=+0.108 (t=13.0), `is_btc_eth` NOT significant (t=-1.4), `seq_gap` tiny (t=-3.3), `log_volume` negative (t=-8.3). **Causal interpretation is ambiguous**: `log_volume` (lifetime traded volume) is a poor proxy for instantaneous book depth at the moment of entry, so we cannot cleanly separate fill count from depth. But the fact that `log_fills` retains t=41.5 after the best available depth control suggests fill count likely has some independent causal role (more fills = more chances to rebalance). For replication: optimize BOTH market selection (depth) AND execution strategy (fill rate).
+21. **BTC/ETH bivariate balance advantage (0.71-0.72 vs SOL/XRP 0.54-0.58) disappears in multivariate.** The advantage is fully explained by fill count and volume differences. `is_btc_eth` β=-0.011, t=-1.4. Don't recommend BTC/ETH over SOL/XRP for balance reasons alone.
+22. **Hourly markets have genuinely independent balance advantage** (+10.8pp, t=13.0 controlling for fills). Not a fill-count proxy. More time = more opportunity windows to balance. This IS actionable for market selection.
+23. **Sells genuinely improve balance, but cross-market comparison is selection-biased.** Cross-market: sell-markets 0.74 vs no-sell 0.60 (14.7pp, biased). Within-market: pre-sell 0.698 → post-sell 0.743 (true effect +4.5pp). Sells don't target the excess side (48.6%) but still improve net balance.
+24. **Self-impact is NOT supported.** Drift/fill DECREASES with more fills (0.31x ratio: low $0.0082, high $0.0025). Consistent with random walk accumulation (σ√n), not self-impact. The 2.2x total drift difference was mechanical.
 25. **Bot is scaling up over 22 days** (+82% daily buy volume, first week $569K → last week $1.03M). Peak concurrent exposure $292K, peak concurrent markets 113.
 26. **Edge capture efficiency is entirely determined by balance.** Well-balanced markets: 59% mean capture, +$159 avg P&L. Very imbalanced: -124% capture, -$23 avg P&L.
+27. **Market volume is NEGATIVELY associated with balance after controlling for fills** (β=-0.020, t=-8.3). Higher-volume markets have worse balance. Possible explanation: competitive pressure from other bots sweeping the same liquidity.
 
 ---
 
@@ -187,7 +188,7 @@ Before starting analysis, investigated three concerns and the order-book-data qu
 ### Key findings
 
 **Central question answered: What causes the 71% edge leakage?**
-The primary bottleneck is **liquidity depth** (available shares on each side), NOT timing or sequencing. Fill count has the strongest correlation with balance quality (r=+0.48). The bot can't always find enough shares on both sides, especially in SOL/XRP markets.
+Fill count has strong independent predictive power for balance quality (r=+0.48 bivariate, t=41.5 in OLS after controlling for `log_volume`). Whether this is causal (more fills → more chances to rebalance) or confounded (both driven by instantaneous book depth, which `log_volume` poorly proxies) cannot be cleanly separated with available data. But `log_fills` retaining t=41.5 after the best available depth control suggests fill count likely has some independent causal role. For replication: optimize both market selection AND fill strategy. Multivariate OLS (R²=0.262): `is_hourly` genuinely independent (+10.8pp, t=13.0), `is_btc_eth` drops out (t=-1.4), `seq_gap` tiny (t=-3.3), `log_volume` negative (t=-8.3, possible competition effect).
 
 **Sequencing (Up/Down buy order):**
 - First side: Up 50.6% / Down 49.4% — no systematic preference
@@ -209,33 +210,36 @@ The primary bottleneck is **liquidity depth** (available shares on each side), N
 **Price trajectory:**
 - Up: first-5 avg $0.486 → last-5 $0.441 (drift -4.5¢)
 - Down: first-5 avg $0.484 → last-5 $0.464 (drift -2.0¢)
-- Self-impact proxy: high-fill markets have 2.2x the absolute drift of low-fill ($0.31 vs $0.14)
+- High-fill markets have 2.2x total drift — but drift/fill DECREASES (0.31x: low $0.0082, high $0.0025)
+- **Self-impact NOT supported**: drift pattern consistent with random walk accumulation (σ√n), not price impact per fill
 - Intra-market price range: avg $0.43 per outcome — massive variance within each market window
-- Cannot attribute to self-impact vs organic movement without order book data
 
 **Sell execution:**
 - Sell delay: mean 219s (3.7 min), median 178s, at 33% of execution window
 - Up/Down sell split: balanced (74K up / 76K down fills)
-- Markets with sells have better balance (0.74 vs 0.60 without)
+- Cross-market: sell-markets 0.74 vs no-sell 0.60 (14.7pp, SELECTION-BIASED — sell-markets are higher-fill)
+- Within-market (causal): pre-sell 0.698 → post-sell 0.743 (genuine +4.5pp improvement)
 - Sells don't target excess side specifically (48.6%) — improvement is indirect
 
 **Balance correlations (KEY — what drives edge capture):**
-| Feature | Spearman r | Interpretation |
-|---------|-----------|---------------|
-| Total fills | +0.48 | **Primary driver** — more liquidity consumed = better balance |
-| Exec duration | +0.42 | Longer execution = more fills = better balance |
-| Sequencing gap | -0.15 | Weak — faster switching helps a little |
-| Entry speed | -0.10 | Negligible — bot is already fast enough |
+| Feature | Bivariate r | OLS β | OLS t | Independent? |
+|---------|-----------|-------|-------|--------------|
+| log(fills) | +0.48 | +0.127 | +41.5 | **Yes** — dominant |
+| is_hourly | — | +0.108 | +13.0 | **Yes** — genuine +10.8pp |
+| is_btc_eth | — | -0.011 | -1.4 | **No** — fully explained by fills/volume |
+| seq_gap | -0.15 | -0.00007 | -3.3 | Barely — 100s gap = -0.7pp |
+| log(volume) | +0.28 | -0.020 | -8.3 | **Yes, negative** — competition effect? |
+| Entry speed | -0.10 | — | — | Not included (negligible) |
 
-**Balance by context:**
-| Context | Avg Balance | Interpretation |
-|---------|------------|---------------|
-| BTC/ETH | 0.71-0.72 | Deeper order books → better balance |
-| SOL/XRP | 0.54-0.58 | Thinner books → worse balance |
-| Hourly markets | 0.79 | More time to accumulate |
-| 15-min markets | 0.63 | Less time, worse balance |
-| Q4 fill count | 0.81 | High-fill markets well-balanced |
-| Q1 fill count | 0.47 | Low-fill markets very imbalanced |
+**Balance by context (bivariate, not controlling for confounders):**
+| Context | Avg Balance | Multivariate finding |
+|---------|------------|---------------------|
+| BTC/ETH | 0.71-0.72 | Advantage disappears controlling for fills |
+| SOL/XRP | 0.54-0.58 | Lower fill count, not inherent disadvantage |
+| Hourly markets | 0.79 | Genuine independent +10.8pp (t=13.0) |
+| 15-min markets | 0.63 | Baseline |
+| Q4 fill count | 0.81 | Strongest bivariate predictor |
+| Q1 fill count | 0.47 | Low fills = low balance (both from thin books) |
 
 **Capital deployment:**
 - Per-market buy outlay: mean $2,291, median $1,146 (heavy-tailed)
