@@ -133,36 +133,84 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
     one_pnl = one_resolved['trade_pnl'].sum()
     total_pnl = both_pnl + one_pnl
 
-    # ── Directional prediction test (three measures to avoid bias) ──
-    # Share-weighted tilt is biased DOWN (cheaper side yields more shares).
-    # Dollar-weighted tilt is biased UP (expensive side costs more per share).
-    # Price-residual tilt controls for both: does the bot allocate beyond
-    # what market prices dictate?
-    both_resolved['share_excess'] = both_resolved['excess_side']
-    both_resolved['share_tilt_correct'] = (
-        both_resolved['share_excess'] == both_resolved['winning_outcome']
+    # ── Directional prediction test ──
+    # All share-count tilts are biased by price asymmetry: cheaper side yields
+    # more shares per dollar AND is more likely to lose → systematic downward bias.
+    # Dollar-weighted is biased upward for the mirror reason.
+    # Must compare to analytical null baseline or use symmetric-market subset.
+
+    # Biased reference measures
+    both_resolved['net_share_excess'] = both_resolved['excess_side']
+    both_resolved['net_share_correct'] = (
+        both_resolved['net_share_excess'] == both_resolved['winning_outcome']
+    )
+    both_resolved['gross_share_excess'] = np.where(
+        both_resolved['buy_up_shares'] >= both_resolved['buy_down_shares'], 'Up', 'Down')
+    both_resolved['gross_share_correct'] = (
+        both_resolved['gross_share_excess'] == both_resolved['winning_outcome']
     )
     both_resolved['dollar_excess'] = np.where(
         both_resolved['buy_up_cost'] >= both_resolved['buy_down_cost'], 'Up', 'Down')
     both_resolved['dollar_tilt_correct'] = (
         both_resolved['dollar_excess'] == both_resolved['winning_outcome']
     )
-    # Price-residual: does bot overweight the winner BEYOND vwap-implied allocation?
-    both_resolved['price_implied_up_frac'] = (
-        both_resolved['vwap_up']
-        / (both_resolved['vwap_up'] + both_resolved['vwap_down']))
+    net_share_acc = both_resolved['net_share_correct'].mean()
+    gross_share_acc = both_resolved['gross_share_correct'].mean()
+    dollar_tilt_acc = both_resolved['dollar_tilt_correct'].mean()
+
+    # Analytical null: under equal-dollar buying, share excess falls on the
+    # cheaper side. Null accuracy = rate at which cheaper side actually won.
+    both_resolved['cheaper_side'] = np.where(
+        both_resolved['vwap_up'] <= both_resolved['vwap_down'], 'Up', 'Down')
+    both_resolved['null_correct'] = (
+        both_resolved['cheaper_side'] == both_resolved['winning_outcome']
+    )
+    null_baseline_acc = both_resolved['null_correct'].mean()
+    # Gross share excess should nearly always match cheaper side (given ~equal dollars)
+    gross_null_agreement = (
+        both_resolved['gross_share_excess'] == both_resolved['cheaper_side']).mean()
+
+    # Symmetric subset: |VWAP_up - VWAP_down| < 5¢ reduces price-asymmetry bias.
+    both_resolved['vwap_gap'] = (both_resolved['vwap_up'] - both_resolved['vwap_down']).abs()
+    symmetric = both_resolved[both_resolved['vwap_gap'] < 0.05]
+    symmetric_count = len(symmetric)
+    symmetric_net_acc = (symmetric['net_share_correct'].mean()
+                         if symmetric_count > 0 else float('nan'))
+    symmetric_gross_acc = (symmetric['gross_share_correct'].mean()
+                           if symmetric_count > 0 else float('nan'))
+    sym_null_acc = (symmetric['null_correct'].mean()
+                    if symmetric_count > 0 else float('nan'))
+    # z-test: gross share tilt vs subset's own null (not 50%)
+    if symmetric_count > 0 and 0 < sym_null_acc < 1:
+        sym_se = np.sqrt(sym_null_acc * (1 - sym_null_acc) / symmetric_count)
+        symmetric_z = (symmetric_gross_acc - sym_null_acc) / sym_se
+    else:
+        symmetric_z = float('nan')
+
+    # Dollar allocation: per-market fraction spent on Up
     both_resolved['actual_up_dollar_frac'] = (
         both_resolved['buy_up_cost']
         / (both_resolved['buy_up_cost'] + both_resolved['buy_down_cost']))
-    both_resolved['residual_excess'] = np.where(
-        both_resolved['actual_up_dollar_frac'] >= both_resolved['price_implied_up_frac'],
-        'Up', 'Down')
-    both_resolved['residual_correct'] = (
-        both_resolved['residual_excess'] == both_resolved['winning_outcome']
-    )
-    share_tilt_acc = both_resolved['share_tilt_correct'].mean()
-    dollar_tilt_acc = both_resolved['dollar_tilt_correct'].mean()
-    residual_tilt_acc = both_resolved['residual_correct'].mean()
+    both_resolved['price_implied_up_frac'] = (
+        both_resolved['vwap_up']
+        / (both_resolved['vwap_up'] + both_resolved['vwap_down']))
+    dollar_frac_mean = both_resolved['actual_up_dollar_frac'].mean()
+    dollar_frac_std = both_resolved['actual_up_dollar_frac'].std()
+
+    # Dollar allocation conditional on outcome.
+    # Raw gap is biased: when Up wins, Up tends to be expensive, so equal-shares
+    # buying mechanically puts more dollars on Up. Must compare actual gap to
+    # price-implied gap (what an equal-shares, no-prediction buyer would produce).
+    # Prediction only if actual gap > implied gap.
+    up_won = both_resolved[both_resolved['winning_outcome'] == 'Up']
+    down_won = both_resolved[both_resolved['winning_outcome'] == 'Down']
+    dollar_frac_up_wins = up_won['actual_up_dollar_frac'].mean()
+    dollar_frac_down_wins = down_won['actual_up_dollar_frac'].mean()
+    dollar_frac_gap = dollar_frac_up_wins - dollar_frac_down_wins
+    price_frac_up_wins = up_won['price_implied_up_frac'].mean()
+    price_frac_down_wins = down_won['price_implied_up_frac'].mean()
+    implied_gap = price_frac_up_wins - price_frac_down_wins
+    excess_gap = dollar_frac_gap - implied_gap
 
     # ── Print findings ──
     print("\n" + "=" * 60)
@@ -197,11 +245,40 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
         print(f"  Recovery rate:        "
               f"{sell_proceeds_total/sell_market_buy_cost*100:.1f}%")
 
-    print(f"\nDirectional tilt accuracy ({len(both_resolved):,} resolved):")
-    print(f"  Share-weighted:  {share_tilt_acc*100:.1f}%  (biased DOWN — cheaper side gets more shares)")
-    print(f"  Dollar-weighted: {dollar_tilt_acc*100:.1f}%  (biased UP — expensive side costs more)")
-    print(f"  Price-residual:  {residual_tilt_acc*100:.1f}%  (unbiased — controls for market prices)")
-    print(f"  Conclusion: {'No prediction beyond market prices' if residual_tilt_acc < 0.50 else 'Evidence of directional prediction'}")
+    print(f"\nDirectional prediction test ({len(both_resolved):,} resolved):")
+    print(f"  Biased measures (for reference):")
+    print(f"    Net share tilt:    {net_share_acc*100:.1f}%  (DOWN bias — sells improve balance)")
+    print(f"    Gross share tilt:  {gross_share_acc*100:.1f}%  (DOWN bias — raw cheap-side excess)")
+    print(f"    Dollar tilt:       {dollar_tilt_acc*100:.1f}%  (UP bias — expensive side costs more)")
+    print(f"  Null baseline (overall cheaper-side win rate): {null_baseline_acc*100:.1f}%")
+    print(f"    Gross-null agreement: {gross_null_agreement*100:.1f}% of markets")
+    print(f"  Symmetric subset (|VWAP gap| < 5c, n={symmetric_count:,}):")
+    if symmetric_count > 0:
+        print(f"    Subset null (cheaper wins): {sym_null_acc*100:.1f}%")
+        print(f"    Gross share tilt: {symmetric_gross_acc*100:.1f}%  "
+              f"(z={symmetric_z:+.2f} vs subset null)")
+        print(f"    Net share tilt:   {symmetric_net_acc*100:.1f}%")
+    print(f"  Dollar allocation conditional on outcome:")
+    print(f"    Actual:        Up wins {dollar_frac_up_wins:.4f} / "
+          f"Down wins {dollar_frac_down_wins:.4f}  (gap {dollar_frac_gap:+.4f})")
+    print(f"    Price-implied: Up wins {price_frac_up_wins:.4f} / "
+          f"Down wins {price_frac_down_wins:.4f}  (gap {implied_gap:+.4f})")
+    print(f"    Excess gap: {excess_gap:+.4f} (actual - implied; >0 = prediction)")
+    print(f"  Overall dollar alloc: mean Up frac {dollar_frac_mean:.4f} "
+          f"(std {dollar_frac_std:.4f})")
+    has_sym = symmetric_count >= 100
+    # One-tailed: only flag prediction if bot does BETTER than null (z > 1.96).
+    # Negative z = anti-prediction (consistent with equal-dollar buying noise).
+    sym_predicts = has_sym and symmetric_z > 1.96
+    # Prediction only if actual gap exceeds price-implied gap.
+    dollar_predicts = excess_gap > 0.01
+    if not has_sym:
+        conclusion = "Inconclusive (insufficient symmetric markets)"
+    elif sym_predicts or dollar_predicts:
+        conclusion = "Evidence of directional prediction"
+    else:
+        conclusion = "No directional prediction"
+    print(f"  Conclusion: {conclusion}")
 
     print(f"\nSpread evolution (daily avg, both-sided):")
     if len(daily_spread) >= 7:
@@ -238,9 +315,19 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
         'daily_spread': daily_spread,
         'resolved_df': both_resolved,
         'tilt_accuracy': {
-            'share_weighted': float(share_tilt_acc),
-            'dollar_weighted': float(dollar_tilt_acc),
-            'price_residual': float(residual_tilt_acc),
+            'net_share': float(net_share_acc),
+            'gross_share': float(gross_share_acc),
+            'dollar': float(dollar_tilt_acc),
+            'null_baseline': float(null_baseline_acc),
+            'gross_null_agreement': float(gross_null_agreement),
+            'symmetric_gross': float(symmetric_gross_acc),
+            'symmetric_net': float(symmetric_net_acc),
+            'symmetric_null': float(sym_null_acc),
+            'symmetric_count': symmetric_count,
+            'symmetric_z': float(symmetric_z),
+            'dollar_frac_gap': float(dollar_frac_gap),
+            'implied_gap': float(implied_gap),
+            'excess_gap': float(excess_gap),
         },
         'summary': {
             'both_sided_count': len(both),
@@ -251,9 +338,18 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
             'total_unmatched': float(both['unmatched_shares'].sum()),
             'total_guaranteed_profit': float(both['guaranteed_profit'].sum()),
             'total_trade_pnl': float(total_pnl),
-            'tilt_accuracy_share': float(share_tilt_acc),
-            'tilt_accuracy_dollar': float(dollar_tilt_acc),
-            'tilt_accuracy_residual': float(residual_tilt_acc),
+            'tilt_net_share': float(net_share_acc),
+            'tilt_gross_share': float(gross_share_acc),
+            'tilt_dollar': float(dollar_tilt_acc),
+            'tilt_null_baseline': float(null_baseline_acc),
+            'tilt_symmetric_gross': float(symmetric_gross_acc),
+            'tilt_symmetric_null': float(sym_null_acc),
+            'tilt_symmetric_z': float(symmetric_z),
+            'dollar_frac_mean': float(dollar_frac_mean),
+            'dollar_frac_std': float(dollar_frac_std),
+            'dollar_frac_gap': float(dollar_frac_gap),
+            'implied_gap': float(implied_gap),
+            'excess_gap': float(excess_gap),
             'sell_recovery_pct': (float(sell_proceeds_total / sell_market_buy_cost)
                                   if sell_market_buy_cost > 0 else 0),
         }
