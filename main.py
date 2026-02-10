@@ -145,6 +145,23 @@ def run_phase5(db: Database, phase3_result: dict, phase4_result: dict):
     return {'pnl': pnl, 'risk': risk}
 
 
+def run_phase6(db: Database, phase3_result: dict, phase4_result: dict):
+    """Phase 6: Temporal & Behavioral Patterns."""
+    from analyzers.temporal import analyze_temporal
+
+    print("\n" + "#" * 60)
+    print("# PHASE 6: TEMPORAL & BEHAVIORAL PATTERNS")
+    print("#" * 60)
+
+    completeness = phase3_result['completeness']
+    structure = phase3_result['structure']
+    pms = db.per_market_summary()
+
+    temporal = analyze_temporal(db, completeness, structure, pms)
+
+    return {'temporal': temporal}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Polymarket bot analysis pipeline")
     parser.add_argument("--wallet", default=config.WALLET_ADDRESS, help="Wallet address to analyze")
@@ -177,6 +194,11 @@ def main():
     phase5_start = time.time()
     run_phase5(db, phase3, phase4)
     print(f"\nPhase 5 completed in {time.time() - phase5_start:.1f}s")
+
+    # Phase 6: Temporal & Behavioral Patterns
+    phase6_start = time.time()
+    run_phase6(db, phase3, phase4)
+    print(f"\nPhase 6 completed in {time.time() - phase6_start:.1f}s")
 
 
 if __name__ == "__main__":

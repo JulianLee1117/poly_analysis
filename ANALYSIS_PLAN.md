@@ -240,48 +240,32 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
 
 ---
 
-## Phase 6: Temporal & Behavioral Patterns
+## Phase 6: Temporal & Behavioral Patterns — REVISED
 
-**Goal:** Identify when and why the bot trades, and detect any behavioral signals that reveal its decision-making logic.
+**Goal:** Identify when and why the bot trades, and detect behavioral signals that reveal its decision-making logic. Focused on questions NOT already answered by Phases 3-5.
 
-**Files to create:**
-- `analyzers/temporal.py` — Time-based patterns:
-  - **Daily activity profile:** Trades per hour-of-day (UTC) — confirm US hours bias, identify exact active window
-  - **Spread-vs-hour cross-reference (CRITICAL):** Combined VWAP by hour of day:
-    - **Known finding:** Spreads vary 4.3¢ by hour. Widest at 2-3 UTC (9.8¢, late US evening). Tightest at 7 UTC (5.5¢).
-    - Peak fills at 14 UTC (US market open) has WIDE spreads (9.4¢), NOT tight — bot follows volume/volatility, not optimal spread windows.
-    - **Test two hypotheses:** (1) Bot trades when operator is awake (human schedule), vs (2) Bot trades when volatility creates fat spreads (systematic)
-    - If spreads are tighter at 3am UTC and the bot doesn't bother → operator schedule. If bot trades at ALL hours but adjusts volume by spread width → systematic.
-    - **Known data:** Bot IS active at all 24 hours (255-389 markets per hour), but fills drop at 22-23 UTC. This is more consistent with operator schedule + volatility interaction.
-  - **Day-of-week pattern:** Does activity vary by weekday? (crypto markets are 24/7 but bot may have human oversight patterns)
-  - **Ramp-up / ramp-down:** Activity level over the 22-day period — is the bot increasing activity (deployment), stable (production), or decreasing (winding down)?
-  - **Session detection:** Identify distinct trading sessions using gaps >30 minutes with no trades
-  - **Market skip analysis:** During active hours, which 15-min windows does the bot skip entirely? What's different about skipped vs traded windows? (requires market metadata to check if markets existed but weren't traded)
+**Already covered (dropped from Phase 6):**
+- Ramp-up/ramp-down → sizing.py section 5 (+82% daily buy volume)
+- Tilt cause analysis (fill count, seq gap, asset, duration) → execution.py OLS R²=0.262
+- Tilt cost quantification → pnl.py drag by tier, sizing.py edge capture by tier
+- Sell impact on balance → execution.py within-market +4.5pp (genuine causal test)
+- Sell timing relative to window → execution.py (3.7 min, 33% of window)
+- Overall spread trend → completeness.py (+5.34¢ over 22 days)
+- Session detection → bot runs 24/7 with minimal gaps (low insight value)
+- Market skip analysis → requires unavailable full market universe
 
-- `analyzers/imbalance.py` — Execution imbalance analysis (renamed from `directional.py` — Phase 3 proved there is no directional model):
-  - **One-sided market failure analysis:** The 366 markets (4.4%) where the bot bought only Up or only Down are **execution failures, not directional bets** (42.7% accuracy, P&L = -$427):
-    - What caused the miss? Timing (entered late, one side already expired/illiquid)? Liquidity (one side had no resting orders)?
-    - Crypto asset distribution: XRP has disproportionately more one-sided (118/1722 = 6.9% vs ~3-4% for others) — is XRP less liquid?
-    - When in the 15-min window do one-sided entries occur? Late entries = "ran out of time" hypothesis.
-    - Position size comparison: smaller than both-sided markets (less capital risked on uncertain execution)?
-  - **Tilt cause analysis (NOT accuracy — already answered: no prediction per symmetric z=-5.10, stratified perm p=1.0):** In both-sided markets, the directional tilt is execution noise. The question is what CAUSES it:
-    - Tilt distribution — how extreme are the imbalances?
-    - Tilt vs sequencing gap — does buying one side first create tilt toward that side (more liquidity available)?
-    - Tilt vs fill count — do high-fill markets have better or worse balance?
-    - Tilt vs time-of-day — does balance vary with market hours?
-    - Tilt cost quantification — for each balance tier, how much P&L is lost to tilt vs a perfectly balanced portfolio?
-  - **Sell trigger identification:** In the 3,035 markets with sells:
-    - **Known:** Avg 3.7 min after first buy, 33% of execution window. 71% on losers at $0.29, 29% on winners at $0.34. Balanced across Up/Down outcomes.
-    - **Hypothesis CONFIRMED:** Bot sells the losing side early to recover partial capital.
-    - Remaining questions: What triggers the sell decision? Price threshold? Time threshold? Comparison to the other side's price?
-    - Does the sell outcome predict the market resolution?
-    - Does selling improve or worsen the balance ratio? (Sells the excess side = rebalancing; sells the short side = worsens imbalance.)
-  - **Spread expansion investigation:** Within-asset spread expansion (+5.34¢ over 22 days) confirmed in Phase 3:
-    - Cross-reference with crypto price volatility if derivable from market resolution patterns
-    - Does the bot's fill count per market change over time?
-    - Does entry speed change? (Faster entry in later weeks could capture wider initial spreads)
+**File: `analyzers/temporal.py`** — Single focused file:
+1. **Hour-of-day activity profile:** Fill volume, buy volume, market count by UTC hour. Identify peak/quiet hours, activity range.
+2. **Spread-vs-hour cross-reference (CRITICAL):** Combined VWAP by hour overlaid with activity.
+   - Test: fills-spread hourly correlation. Positive = spread-seeking (systematic). Negative/flat = operator schedule.
+   - Compare wide-spread hours vs tight-spread hours activity levels.
+   - Verdict: operator schedule, systematic, or mixed.
+3. **Day-of-week pattern:** Weekend vs weekday ratio. Human oversight signal.
+4. **One-sided failure timing:** Entry speed of one-sided vs both-sided markets (Mann-Whitney). Late entry rate by category. Capital deployed comparison. Per-asset one-sided rates.
+5. **Sell trigger identification:** First sell price distribution, deterioration from entry (first_sell_price / buy_VWAP), sell delay distribution, price threshold analysis. Resolution accuracy by sell price bracket — confirms price-based loss-cutting.
+6. **Spread expansion decomposition:** Per-asset spread trends, fills/market over time, entry speed over time, daily spread-fills correlation, markets/day trend.
 
-**Verify:** One-sided markets should correlate with late entry and/or low liquidity, NOT directional conviction (Phase 3: 42.7% one-sided accuracy, symmetric z=-5.10, stratified perm p=1.0). Tilt should correlate with sequencing gap and/or liquidity asymmetry. Sell triggers should reveal systematic rules — likely price-based. Spread expansion should be explainable by at least one testable factor.
+**Verify:** Hour-of-day should reveal whether bot follows operator schedule or optimal spreads. One-sided markets should correlate with late entry. Sell trigger should show consistent price threshold (~$0.30). Spread expansion should decompose by asset.
 
 ---
 

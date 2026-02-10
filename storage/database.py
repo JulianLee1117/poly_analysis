@@ -376,6 +376,77 @@ class Database:
                 params=(condition_id,),
             )
 
+    def hourly_activity(self) -> pd.DataFrame:
+        """Hourly (UTC) aggregation of fills, volume, market count."""
+        query = """
+        SELECT
+            CAST(strftime('%H', datetime(timestamp, 'unixepoch')) AS INTEGER) as hour_utc,
+            COUNT(*) as fills,
+            SUM(usdc_value) as volume,
+            COUNT(DISTINCT condition_id) as markets,
+            SUM(CASE WHEN side='BUY' THEN usdc_value ELSE 0 END) as buy_volume
+        FROM trades WHERE activity_type = 'TRADE'
+        GROUP BY hour_utc
+        ORDER BY hour_utc
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    def day_of_week_activity(self) -> pd.DataFrame:
+        """Day-of-week aggregation (0=Sun, 6=Sat)."""
+        query = """
+        SELECT
+            CAST(strftime('%w', date(timestamp, 'unixepoch')) AS INTEGER) as dow,
+            COUNT(*) as fills,
+            SUM(usdc_value) as volume,
+            COUNT(DISTINCT condition_id) as markets
+        FROM trades WHERE activity_type = 'TRADE'
+        GROUP BY dow
+        ORDER BY dow
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    def sell_detail_by_market(self) -> pd.DataFrame:
+        """Per-market per-outcome sell statistics with first sell price."""
+        query = """
+        WITH sell_stats AS (
+            SELECT
+                condition_id,
+                outcome,
+                COUNT(*) as sell_fills,
+                AVG(price) as avg_sell_price,
+                MIN(price) as min_sell_price,
+                MAX(price) as max_sell_price,
+                SUM(usdc_value) as sell_proceeds,
+                SUM(size) as sell_shares,
+                MIN(timestamp) as first_sell_ts,
+                MAX(timestamp) as last_sell_ts
+            FROM trades
+            WHERE activity_type='TRADE' AND side='SELL'
+            GROUP BY condition_id, outcome
+        ),
+        first_sells AS (
+            SELECT condition_id, outcome, price as first_sell_price
+            FROM (
+                SELECT condition_id, outcome, price,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY condition_id, outcome
+                        ORDER BY timestamp
+                    ) as rn
+                FROM trades
+                WHERE activity_type='TRADE' AND side='SELL'
+            )
+            WHERE rn = 1
+        )
+        SELECT s.*, f.first_sell_price
+        FROM sell_stats s
+        LEFT JOIN first_sells f
+            ON s.condition_id = f.condition_id AND s.outcome = f.outcome
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
     def daily_summary(self) -> pd.DataFrame:
         """Daily trade count, volume, and market count."""
         query = """

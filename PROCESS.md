@@ -20,7 +20,7 @@
 14. **All share-count and dollar tilt measures are biased by price asymmetry.** Share-weighted (41.4%) biased DOWN, dollar-weighted (68.4%) biased UP. The old "price-residual" test was algebraically identical to gross share count (S_u >= S_d) — prices cancel entirely, leaving the same downward bias. **Unbiased tests:** (a) Symmetric subset (|VWAP gap| < 5¢, n=701): agreement-adjusted null 49.7%, gross tilt 40.1%, z=-5.10 — anti-prediction. (b) Stratified permutation (shuffle outcomes within 20 price bins, 10K shuffles): observed gap +0.149 vs null mean +0.160, p=1.0 — bot allocates LESS toward winner than null. (c) Near-equal allocation: mean Up frac 0.4925 (std 0.1963). Conclusion: no directional prediction.
 17. **Never compare tilt accuracy to 50%.** In these momentum markets, the cheaper side wins only 16.6% of the time (overall) or 46.4% (symmetric subset). Always compare to the agreement-adjusted null baseline, or use the stratified permutation test (shuffle outcomes within price bins to preserve price-outcome correlation).
 18. **Permutation tests on allocation must be stratified by price.** Unstratified shuffle of outcome labels breaks the price-outcome correlation (expensive side wins ~83%), giving null mean ≈ 0 for dollar allocation gap — a false positive. Stratify by price_implied_up_frac (20 quantile bins) to preserve price-outcome link.
-15. **Spreads EXPANDED over 22 days** (+5.34¢). First week 4.3¢, last week 9.6¢. Opposite of expected competition-driven compression. Investigate in Phase 6.
+15. **Spreads EXPANDED over 22 days** (+5.34¢). First week 4.3¢, last week 9.6¢. Opposite of expected competition-driven compression. Phase 6: universal across all 4 assets (XRP widest +8.2¢, ETH +6.0¢). Positively correlated with fills/market over time (r=+0.45, p=0.033) — wider spreads come with more activity, not less.
 16. **When determining market resolution, use BOTH cur_price=0 and cur_price=1.** Using only cur_price=1 creates survivorship bias on one-sided markets (misses losers whose only position resolved to 0).
 19. **12% of markets are hourly, not 15-min.** 7,309 markets have "7:45AM-8:00AM" format (900s), 1,004 have "6PM" format (3600s). Market open = end_date minus duration. Use `_parse_market_duration()` in execution.py.
 20. **Fill count has strong independent predictive power for balance** (r=+0.48 bivariate, t=41.5 in OLS controlling for log_volume). Multivariate OLS (R²=0.262): `log_fills` β=+0.127 (t=41.5), `is_hourly` β=+0.108 (t=13.0), `is_btc_eth` NOT significant (t=-1.4), `seq_gap` tiny (t=-3.3), `log_volume` negative (t=-8.3). **Causal interpretation is ambiguous**: `log_volume` (lifetime traded volume) is a poor proxy for instantaneous book depth at the moment of entry, so we cannot cleanly separate fill count from depth. But the fact that `log_fills` retains t=41.5 after the best available depth control suggests fill count likely has some independent causal role (more fills = more chances to rebalance). For replication: optimize BOTH market selection (depth) AND execution strategy (fill rate).
@@ -38,6 +38,11 @@
 32. **Bitcoin dominates P&L but this is from market depth, not an intrinsic BTC property.** BTC: $181K, 34% capture, 60% win rate. ETH: $71K, 27%. SOL: $19K, 18%. XRP: $10K, 17%. BTC/ETH have deeper books → more fills → better balance → higher capture. Phase 4 OLS: is_btc_eth t=-1.4 (not significant after controlling for fills). For replication: target depth, not asset.
 33. **Sharpe 18 annualized is resolution-based, not mark-to-market.** P&L recognized at market close, so open-position exposure is invisible. High Sharpe confirms consistent arb execution, but does NOT indicate low real-time risk. More practical metric: max drawdown / peak exposure = ~4% (-$12K / $292K). 84% of days profitable. Calmar 375.
 34. **Win rate 53.6% at market level** (4,259/7,945 both-sided). Well-balanced markets: 61.5% win, avg +$69. Very imbalanced: 36.8% win, avg -$38. Profit factor 1.31.
+35. **Bot activity does NOT follow spread width.** Fills-spread hourly correlation r=-0.076, p=0.725 (not significant). Wide-spread hours (6 widest) avg 52.5K fills vs tight-spread hours (6 tightest) avg 52.2K — nearly identical. Verdict: market-cadence-driven automation. The 2.0x peak/quiet ratio is too flat for human scheduling — consistent with fully automated bot modulated by Polymarket's market creation rate (more markets during US hours), not an operator schedule.
+36. **One-sided markets are confirmed late entries.** One-sided median entry speed 22s vs both-sided 8s (Mann-Whitney p=0.0000). 35.9% of one-sided markets enter after 60s vs 9.8% of both-sided. Avg capital deployed only $236 (vs $2,291 both-sided). XRP has highest one-sided rate (6.9%) confirming thinner liquidity.
+37. **Sell trigger is price-based, not time-based. Two distinct mechanisms.** (a) Loss-cutting (58%): first sell below entry VWAP, avg 24% deterioration, median delay 264s. (b) Rebalancing (42%): first sell above entry VWAP (avg 1.32x), median delay 198s — selling excess winners faster. Overall: first sell price median $0.40, 99.3% below $0.50. Resolution accuracy scales with sell price: $0.00-0.20 → 90.7% sold a loser, $0.40-0.50 → 57.6%. The price distribution may reflect the natural price path of losing outcomes rather than a deliberate $0.40 threshold, but the monotonic resolution gradient confirms the signal is directionally correct for replication.
+38. **Weekend activity is moderately reduced** (0.89x weekday fills). Suggests mostly automated with some human oversight — not pure 24/7 autonomy.
+39. **Spread expansion is universal across all 4 assets.** XRP widened most (+8.2¢), ETH next (+6.0¢), BTC (+3.8¢), SOL (+3.4¢). Fills/market INCREASED (144 → 213) and entry speed IMPROVED (11.7s → 7.1s) during the same period. Wider spreads are NOT from reduced activity — the bot is getting better at execution while spreads widen (market conditions, not competition). **CAVEAT: 22-day window covers a single volatility regime.** Strategy profitability is partially conditional on continued crypto volatility maintaining wide spreads.
 
 ---
 
@@ -350,7 +355,73 @@ Fill count has strong independent predictive power for balance quality (r=+0.48 
 
 ---
 
-## Phase 6: Temporal & Behavioral Patterns — PENDING
+## Phase 6: Temporal & Behavioral Patterns — COMPLETE
+
+### Files created
+- `analyzers/temporal.py` — hour-of-day, spread-vs-hour, day-of-week, one-sided timing, sell triggers, spread expansion decomposition
+- `database.py` additions: `hourly_activity()`, `day_of_week_activity()`, `sell_detail_by_market()`
+
+### What was pruned (already covered in Phases 3-5)
+- Ramp-up/ramp-down → sizing.py (+82% daily volume)
+- Tilt cause analysis → execution.py OLS (R²=0.262, fills dominant)
+- Tilt cost quantification → pnl.py drag by tier, sizing.py edge capture by tier
+- Sell impact on balance → execution.py within-market +4.5pp
+- Session detection → bot runs 24/7 (low value)
+- Market skip analysis → requires unavailable full market universe
+
+### Key findings
+
+**Hour-of-day activity:**
+- Peak: 14:00 UTC (76K fills, US market open). Quiet: 22:00 UTC (39K fills)
+- Peak/quiet ratio only 2.0x — bot is active all 24 hours
+- Activity tracks volatility/volume, not spread opportunity
+
+**Spread-vs-hour (CRITICAL test):**
+- Fills-spread hourly correlation: r=-0.076, p=0.725 (NOT significant)
+- Wide-spread hours: avg 52.5K fills. Tight-spread hours: avg 52.2K fills — nearly identical
+- Verdict: **MARKET-CADENCE-DRIVEN AUTOMATION.** 2.0x peak/quiet ratio too flat for human scheduling. Bot fires on every new market regardless of spread, activity modulated by Polymarket's market creation rate.
+- Implication for replication: hourly spread optimization could yield marginal improvement
+
+**Day-of-week:**
+- Weekend/weekday fill ratio: 0.89x (moderate reduction)
+- Suggests mostly automated with some human oversight — not pure autonomy
+- Mon peak (226K fills), Sat trough (171K fills)
+
+**One-sided failure mode (confirmed: late entries):**
+- One-sided entry speed: median 22s vs both-sided 8s (Mann-Whitney p<0.0001)
+- Late entry (>60s): one-sided 35.9% vs both-sided 9.8% — 3.7x higher
+- Avg capital: $236 one-sided vs $2,291 both-sided — bot commits less when uncertain
+- XRP: 6.9% one-sided rate (highest), BTC: 3.8% (lowest) — confirms XRP thinner liquidity
+- Mechanism: bot arrives late (after market open), one side's liquidity already consumed
+
+**Sell trigger identification:**
+- First sell price: median $0.40, 99.3% below $0.50
+- **Two distinct mechanisms:**
+  - Loss-cutting (58% of sell events): first sell below entry VWAP, avg 24% deterioration, median delay 264s
+  - Rebalancing (42%): first sell above entry VWAP (avg 1.32x entry), median delay 198s — selling excess winners faster
+- Resolution accuracy scales with sell price:
+  - $0.00-0.20: 90.7% sold a loser (very confident signal)
+  - $0.20-0.30: 73.6% sold a loser
+  - $0.30-0.40: 66.5% sold a loser
+  - $0.40-0.50: 57.6% sold a loser (near coin flip)
+- Timing: median 236s delay, 40% happen 2-5 min after first buy
+- Note: the ~$0.40 threshold may reflect the natural price path of losing outcomes rather than a deliberate rule, but the monotonic resolution gradient confirms the signal is directionally correct
+
+**Spread expansion decomposition:**
+- Universal across all 4 assets: XRP +8.2¢, ETH +6.0¢, BTC +3.8¢, SOL +3.4¢
+- Fills/market INCREASED (144 → 213) — more execution, not less
+- Entry speed IMPROVED (11.7s → 7.1s) — faster entry in later weeks
+- Markets/day stable (341 → 327) — same opportunity set
+- Daily spread-fills correlation: r=+0.447, p=0.033 — wider spreads come with more fills
+- Conclusion: spread expansion is from market conditions (possibly higher crypto volatility), not reduced competition. The bot is executing better (faster entry, more fills) while spreads widen — favorable for the strategy.
+- CAVEAT: 22-day window covers a single volatility regime. Strategy profitability is partially conditional on continued crypto volatility.
+
+### Decisions made
+- **Single file (`temporal.py`) instead of two** (temporal + imbalance). Remaining imbalance questions are behavioral/temporal in nature. The heavy imbalance analysis was already in execution.py.
+- **Pruned 6 planned analyses** that were fully covered by Phases 3-5 to avoid redundancy.
+- **Sell trigger uses first_sell_price** (not avg) for trigger analysis — the initial trigger is more informative than the average across subsequent fills.
+- **Resolution accuracy by price bracket** confirms the sell rule is price-based: lower sell price = higher certainty of selling a loser.
+- **No new SQL helpers needed for most analyses** — derived from existing per_market_summary and completeness results. Added 3 targeted helpers for hourly, day-of-week, and sell detail.
 
 ---
 
