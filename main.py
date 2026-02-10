@@ -162,6 +162,22 @@ def run_phase6(db: Database, phase3_result: dict, phase4_result: dict):
     return {'temporal': temporal}
 
 
+def run_phase7(db: Database, phase3: dict, phase4: dict,
+               phase5: dict, phase6: dict):
+    """Phase 7: Strategy Synthesis & Report."""
+    from analyzers.strategy_synthesis import synthesize
+    from reporting.report_generator import generate_report
+
+    print("\n" + "#" * 60)
+    print("# PHASE 7: STRATEGY SYNTHESIS & REPORT")
+    print("#" * 60)
+
+    synthesis = synthesize(phase3, phase4, phase5, phase6)
+    report_path = generate_report(db, phase3, phase4, phase5, phase6, synthesis)
+
+    return {'synthesis': synthesis, 'report_path': report_path}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Polymarket bot analysis pipeline")
     parser.add_argument("--wallet", default=config.WALLET_ADDRESS, help="Wallet address to analyze")
@@ -192,13 +208,18 @@ def main():
 
     # Phase 5: P&L Decomposition & Risk
     phase5_start = time.time()
-    run_phase5(db, phase3, phase4)
+    phase5 = run_phase5(db, phase3, phase4)
     print(f"\nPhase 5 completed in {time.time() - phase5_start:.1f}s")
 
     # Phase 6: Temporal & Behavioral Patterns
     phase6_start = time.time()
-    run_phase6(db, phase3, phase4)
+    phase6 = run_phase6(db, phase3, phase4)
     print(f"\nPhase 6 completed in {time.time() - phase6_start:.1f}s")
+
+    # Phase 7: Strategy Synthesis & Report
+    phase7_start = time.time()
+    run_phase7(db, phase3, phase4, phase5, phase6)
+    print(f"\nPhase 7 completed in {time.time() - phase7_start:.1f}s")
 
 
 if __name__ == "__main__":

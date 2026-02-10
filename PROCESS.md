@@ -425,4 +425,41 @@ Fill count has strong independent predictive power for balance quality (r=+0.48 
 
 ---
 
-## Phase 7: Strategy Synthesis & Report — PENDING
+## Phase 7: Strategy Synthesis & Report — COMPLETE
+
+### Files created
+- `analyzers/strategy_synthesis.py` — cross-phase aggregator: strategy classification, headline metrics, bot fingerprint, replication feasibility
+- `reporting/__init__.py` — package init
+- `reporting/charts.py` — 13 Plotly chart functions (waterfall, cumulative P&L, spread/balance distributions, balance vs P&L scatter, per-asset P&L, spread evolution, hourly activity, spread by hour, capital deployment, edge capture by tier, entry speed, example market timeline)
+- `reporting/report_generator.py` — self-contained HTML report with 8 sections, inline CSS, Plotly CDN, sticky TOC navigation
+- `main.py` addition: `run_phase7()` wiring all phase results to synthesis + report
+
+### What was changed from original plan
+- `strategy_synthesis.py` slimmed from narrative-printing analyzer to lean cross-phase aggregator. All analysis already done in Phases 3-6; synthesis just organizes into report-friendly dict.
+- Charts reduced from 16 to 13: dropped trade size distribution (low value); merged win rate into per-asset P&L; simplified day×hour heatmap to hour-of-day bar; added edge capture by balance tier (high value).
+- Fixed entry_speed chart: column not in `sequencing_df` (computed after `seq` copy in execution.py). Fixed by deriving from `first_fill_ts - open_ts` in the chart function.
+- Phase 5 return value now captured (`phase5 = run_phase5(...)`) — was previously discarded.
+
+### Report structure (output/report.html)
+- **Section 1: Executive Summary** — 8 metric cards, strategy description, central finding callout
+- **Section 2: Market Universe** — asset distribution table, sidedness, one-sided failure note
+- **Section 3: Completeness Arbitrage** — VWAP/spread metrics, balance tier table, spread + balance histograms, no-directional-model evidence
+- **Section 4: Execution Microstructure** — entry speed, duration, sequencing, hourly activity, spread-vs-hour, automation verdict
+- **Section 5: Edge Leakage** — waterfall chart (THE central chart), leakage component table, balance vs P&L scatter, edge capture by tier
+- **Section 6: P&L Decomposition** — three-component table, sell discipline finding, cumulative P&L, per-asset P&L
+- **Section 7: Risk & Performance** — Sharpe, drawdown, win/loss, streaks, tail risk
+- **Section 8: Bot Signature & Replication** — fingerprint table, replication requirements, edge sustainability, regime caveat, data limitations
+- **Appendix** — spread evolution, capital deployment, example market timeline
+
+### Key outputs
+- 545 KB self-contained HTML report at `output/report.html`
+- 13 interactive Plotly charts embedded via CDN
+- Full pipeline runs in ~19s total (0.5s for Phase 7)
+
+### Decisions made
+- **Plotly CDN (single include)** instead of embedding 3MB plotly.js per chart. Requires internet for chart rendering.
+- **ScatterGL** for balance vs P&L (7,945 points) — WebGL rendering for performance.
+- **Chart functions return None** on missing data instead of raising — graceful degradation.
+- **No new database helpers needed** — all data available from existing phase results. Only exception: `db.market_fills()` for the example timeline.
+- **Report is the primary output, not console printing.** Synthesis prints a brief summary; narrative goes in the HTML.
+- **Tier labels use snake_case internally** (`well_balanced`) matching completeness.py, with display mapping to title case in charts and report.

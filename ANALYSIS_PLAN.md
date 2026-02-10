@@ -269,70 +269,53 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
 
 ---
 
-## Phase 7: Strategy Synthesis & Report
+## Phase 7: Strategy Synthesis & Report — REVISED
 
-**Goal:** Bring all analyzer outputs together into a coherent reverse-engineering conclusion and generate a visual report.
+**Goal:** Bring all analyzer outputs together into a coherent reverse-engineering conclusion and generate a visual HTML report.
+
+**Changes from original plan:**
+- `strategy_synthesis.py` slimmed to cross-phase aggregation only — all analysis already done in Phases 3-6. No narrative reprinting; narrative lives in the report.
+- Charts reduced from 16 to 13: dropped trade size distribution (low value); merged win rate into per-asset P&L chart; simplified day×hour heatmap to hour-of-day bar (no new SQL needed); added edge capture by balance tier (high value).
+- Added `reporting/__init__.py` (missing from original plan).
+- Report uses Plotly CDN (single include), self-contained HTML, no external dependencies.
 
 **Files to create:**
-- `analyzers/strategy_synthesis.py` — Synthesize findings:
-  - **Strategy classification: Pure completeness arbitrage.** Phase 3 proved there is no directional model (symmetric z=-5.10, stratified perm p=1.0, one-sided accuracy 42.7%, near-equal allocation). All profit comes from the spread between combined entry cost and $1.00 resolution. The bot's engineering challenge is execution balance, not price prediction.
-  - **Edge leakage analysis (the central finding):** The bot captures only 29% of its theoretical edge ($281K actual / $962K theoretical). Quantify the leakage sources:
-    1. **Completeness spread:** $962K theoretical (matched_pairs × spread) — the full edge if perfectly balanced
-    2. **Directional drag:** Large NEGATIVE number — the cost of 5.13M unmatched shares at 41.4% accuracy. This is execution noise, not failed alpha.
-    3. **Sell losses:** Net loss from loss-cutting ($2.2M proceeds vs higher cost basis)
-    4. **Sell discipline value (counterfactual):** Report from Phase 5 — did selling improve or worsen returns vs hold-to-resolution?
-    5. **Maker rebates:** $40.7K — passive income component
-    - **Edge capture efficiency** = actual / theoretical = 29%. This is the bot's quality score.
-  - **Edge identification:** What gives this bot its edge?
-    - Speed: how fast does it enter after market opens? (measurable from trade timestamps)
-    - Coverage: trading ~370 markets/day across ~4 assets — breadth is the multiplier
-    - Balance quality: well-balanced markets capture more of the spread — what drives balance? (from Phase 4)
-    - Loss management: does the sell discipline meaningfully improve returns vs hold-to-resolution?
-    - **No directional model.** Phase 3 definitively ruled this out via symmetric subset test (z=-5.10 vs adjusted null) and stratified permutation (p=1.0). The bot does not predict price direction.
-    - **Cannot determine without order book data:** Whether the bot gets better prices than other participants, whether it provides or consumes liquidity per fill, or what the competitive landscape looks like.
-  - **Bot signature fingerprint:** Summarize the distinguishing characteristics:
-    - Execution pattern (fill sizes, timing, sequencing, balance quality)
-    - Capital management (per-market sizing, concurrent exposure)
-    - Active hours and session structure
-    - Crypto asset preferences
-  - **Replication feasibility:** What would it take to replicate this strategy?
-    - Capital requirements (concurrent exposure estimate)
-    - Infrastructure requirements (latency, API access)
-    - No price prediction model needed — pure execution engineering
-    - Edge sustainability: spreads are **expanding** (+5.34¢ over 22 days), not compressing. Currently favorable, but may reflect temporary market conditions.
-    - **Improvement opportunity:** If execution balance could be improved from current levels (37.9% well-balanced) to near-100%, the same capital base could yield ~3.4x the profit ($962K vs $281K). The engineering ROI on better balancing is enormous.
+- `analyzers/strategy_synthesis.py` — Lean cross-phase aggregator:
+  - Collects key metrics from all phase results into a unified dict
+  - Strategy classification, headline metrics, bot fingerprint, replication feasibility, data limitations
+  - Prints brief console summary (report is the primary output)
+  - Returns structured dict consumed by report generator
 
-- `reporting/charts.py` — Chart functions (all Plotly for interactive HTML):
-  1. **Completeness spread distribution** — histogram of (1.00 - combined_VWAP) per market
-  2. **Balance ratio distribution** — histogram showing tilt toward Up vs Down
-  3. **Fill timeline (example market)** — scatter plot showing individual fills within a 15-min window
-  4. **Daily P&L bar chart** — with cumulative overlay line
-  5. **Cumulative P&L curve** — with drawdown shading
-  6. **Hour-of-day heatmap** — trade count by day × hour
-  7. **Per-asset P&L breakdown** — stacked bar (BTC/ETH/SOL)
-  8. **Entry speed histogram** — time from market open to first fill
-  9. **Spread evolution over time** — daily average combined VWAP trend (competition signal)
-  10. **Balance ratio vs P&L** — scatter of balance ratio vs market P&L (replaces "directional tilt accuracy" — no directional model exists)
-  11. **Capital deployment over time** — daily concurrent exposure
-  12. **Trade size distribution** — log-scale histogram of fill sizes
-  13. **Edge leakage waterfall** — $962K theoretical spread → directional drag → sell losses → $281K actual (the 71% leakage story)
-  14. **Win rate by crypto asset** — grouped bar
-  15. **Price trajectory** — fill prices over time within market windows (NOT slippage — no BBO benchmark)
-  16. **Spread by hour of day** — combined VWAP by hour, overlaid with fill volume (volatility vs activity)
+- `reporting/__init__.py` — Package init
 
-- `reporting/report_generator.py` — HTML report assembly:
-  - **Section 1: Executive Summary** — strategy classification, total P&L, key metrics
-  - **Section 2: Market Universe** — crypto asset breakdown, market structure, coverage
-  - **Section 3: Completeness Arbitrage** — spread analysis, matched vs unmatched shares
-  - **Section 4: Execution Microstructure** — fill patterns, entry speed, price trajectory, sell behavior
-  - **Section 5: Execution Balance & Edge Leakage** — why 71% of theoretical edge is lost (imbalance analysis, one-sided failures, tilt costs)
-  - **Section 6: P&L Decomposition** — $281K from trade data + $432K from pre-window positions = $713K total. $962K theoretical → $281K actual waterfall.
-  - **Section 7: Risk & Performance** — Sharpe, drawdown, win rate, capital efficiency
-  - **Section 8: Bot Signature & Replication** — fingerprint, edge sustainability, capital requirements
+- `reporting/charts.py` — 13 Plotly chart functions (each returns a Figure):
+  1. **Edge leakage waterfall** — THE central chart: $962K → drag → sell → $281K
+  2. **Cumulative P&L + daily bars** — dual-axis bar/line combo
+  3. **Completeness spread distribution** — histogram of (1.00 - combined_VWAP)
+  4. **Balance ratio distribution** — histogram of min/max share ratio
+  5. **Balance ratio vs P&L** — scatter colored by balance tier
+  6. **Per-asset P&L + win rate** — grouped bar with secondary axis for win rate
+  7. **Spread evolution over time** — line with trendline showing +5.34¢ expansion
+  8. **Hour-of-day activity** — bar chart of fills by UTC hour
+  9. **Spread by hour of day** — dual-axis: fills bar + spread line (shows no correlation)
+  10. **Capital deployment over time** — area chart of daily buy volume (+82% trend)
+  11. **Edge capture by balance tier** — bar showing 59% → -124% gradient
+  12. **Entry speed histogram** — distribution of market-open-to-first-fill time
+  13. **Example market fill timeline** — scatter of fills within a single 15-min window
 
-- `main.py` (complete) — Full pipeline: `--skip-fetch` to skip collection, `--wallet` to change target, runs collection → analysis → synthesis → report
+- `reporting/report_generator.py` — Self-contained HTML report:
+  - **Section 1: Executive Summary** — metric cards + strategy description
+  - **Section 2: Market Universe** — asset distribution table, sidedness, market types
+  - **Section 3: Completeness Arbitrage** — spread + balance charts, tier table, no directional model evidence
+  - **Section 4: Execution Microstructure** — entry speed, hourly activity, spread-vs-hour, automation verdict
+  - **Section 5: Edge Leakage** — waterfall, balance vs P&L scatter, edge capture by tier, fill count driver
+  - **Section 6: P&L Decomposition** — three-component breakdown, cumulative P&L, per-asset, sell discipline
+  - **Section 7: Risk & Performance** — Sharpe, drawdown, win/loss stats, capital efficiency
+  - **Section 8: Bot Signature & Replication** — fingerprint table, replication guide, regime caveat, data limitations
 
-**Verify:** Open `output/report.html` in browser. All charts render. Findings are internally consistent. Trade-derived P&L = ~$281K for 8,310 resolved markets. Position-derived P&L = $713K total. Gap of $432K from pre-trade-window markets is clearly documented. Edge leakage waterfall: $962K theoretical → directional drag → sell losses → $281K actual = 29% capture rate. Maker rebates ($40.7K) accounted for. Strategy conclusion: pure completeness arbitrage, no directional model, supported by quantitative evidence (symmetric z=-5.10, stratified perm p=1.0, one-sided accuracy 42.7%, near-equal allocation 0.4925).
+- `main.py` — Add `run_phase7()` wiring all phase results to synthesis + report
+
+**Verify:** Open `output/report.html` in browser. All 13 charts render interactively. Findings internally consistent. Edge leakage waterfall: $962K → drag -$134K → sell -$547K → $281K = 29% capture. Strategy: pure completeness arbitrage, no directional model (z=-5.10, p=1.0).
 
 ---
 
