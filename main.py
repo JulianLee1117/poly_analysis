@@ -90,6 +90,24 @@ def print_summary(db: Database):
     print("=" * 60)
 
 
+def run_phase3(db: Database):
+    """Phase 3: Market Structure & Completeness Arbitrage."""
+    from analyzers.market_structure import analyze_market_structure
+    from analyzers.completeness import analyze_completeness
+
+    print("\n" + "#" * 60)
+    print("# PHASE 3: MARKET STRUCTURE & COMPLETENESS ARBITRAGE")
+    print("#" * 60)
+
+    pms = db.per_market_summary()
+    print(f"\nPer-market summary: {len(pms):,} markets from trade data")
+
+    structure = analyze_market_structure(db, pms)
+    completeness = analyze_completeness(db, pms)
+
+    return {'structure': structure, 'completeness': completeness}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Polymarket bot analysis pipeline")
     parser.add_argument("--wallet", default=config.WALLET_ADDRESS, help="Wallet address to analyze")
@@ -107,6 +125,11 @@ def main():
 
     print_summary(db)
     print(f"\nCollection completed in {elapsed:.1f}s")
+
+    # Phase 3: Analysis
+    phase3_start = time.time()
+    run_phase3(db)
+    print(f"\nPhase 3 completed in {time.time() - phase3_start:.1f}s")
 
 
 if __name__ == "__main__":

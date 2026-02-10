@@ -256,3 +256,31 @@ class Database:
                 "SELECT condition_id, MIN(asset) as asset FROM trades GROUP BY condition_id"
             ).fetchall()
             return {row["condition_id"]: row["asset"] for row in rows}
+
+    def per_market_summary(self) -> pd.DataFrame:
+        """Per-condition_id trade aggregates via SQL. One row per market.
+
+        Returns ~8,313 rows with buy/sell costs, shares, fill counts per outcome.
+        Foundation for all Phase 3+ analysis. Never loads raw trades.
+        """
+        query = """
+        SELECT
+            condition_id,
+            SUM(CASE WHEN side='BUY' AND outcome='Up' THEN usdc_value ELSE 0 END) as buy_up_cost,
+            SUM(CASE WHEN side='BUY' AND outcome='Up' THEN size ELSE 0 END) as buy_up_shares,
+            SUM(CASE WHEN side='BUY' AND outcome='Down' THEN usdc_value ELSE 0 END) as buy_down_cost,
+            SUM(CASE WHEN side='BUY' AND outcome='Down' THEN size ELSE 0 END) as buy_down_shares,
+            SUM(CASE WHEN side='SELL' AND outcome='Up' THEN usdc_value ELSE 0 END) as sell_up_proceeds,
+            SUM(CASE WHEN side='SELL' AND outcome='Up' THEN size ELSE 0 END) as sell_up_shares,
+            SUM(CASE WHEN side='SELL' AND outcome='Down' THEN usdc_value ELSE 0 END) as sell_down_proceeds,
+            SUM(CASE WHEN side='SELL' AND outcome='Down' THEN size ELSE 0 END) as sell_down_shares,
+            COUNT(*) as total_fills,
+            SUM(CASE WHEN side='BUY' THEN 1 ELSE 0 END) as buy_fills,
+            SUM(CASE WHEN side='SELL' THEN 1 ELSE 0 END) as sell_fills,
+            MIN(timestamp) as first_fill_ts,
+            MAX(timestamp) as last_fill_ts
+        FROM trades WHERE activity_type = 'TRADE'
+        GROUP BY condition_id
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
