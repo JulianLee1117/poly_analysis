@@ -46,11 +46,12 @@
 40. **Bot is 87.3% maker (liquidity provider).** From 20K tx sample → 31,656 on-chain fills → 23,624 joined to trades. The bot posts limit orders that get filled, not market orders. This resolves the $40.7K rebate mystery from rule 6 — rebates are real because the bot IS a maker on most fills. ±0.7% CI on proportions (sample-based).
 41. **BUY side is 93.7% maker, SELL side is 56.2% maker.** The bot posts limit buy orders on both outcomes simultaneously, then reacts to fills with taker sell orders (loss-cutting). This is consistent with the completeness arbitrage strategy: passive limit orders capture spread, active sell orders manage exposure.
 42. **Maker rate varies by asset: SOL/XRP 94-96% maker, BTC/ETH ~86%.** Deeper BTC/ETH books have more competing makers, forcing occasional taker fills. The difference reinforces rule 21 — asset choice matters less than depth.
-43. **Top "counterparty" is the CTF Exchange contract itself (26.8% of fills).** This is the intermediary in multi-fill transactions (OrdersMatched), not a real counterparty. The bot's ACTUAL counterparty universe is 5,487 unique addresses, highly concentrated: Gini 0.892, top-10 = 42% of volume. Few dominant counterparties are likely other bots.
-44. **On-chain `fee` field is the TAKER's fee.** Maker fills show fee=0 on-chain. This means total on-chain fees in sample ($54.9K) are taker fees only. Maker rebates ($40.7K) are off-chain Polymarket incentives, not visible in OrderFilled events. For P&L revision: net fee impact = rebates - taker_fees.
-45. **Self-impact: no difference between high-maker and high-taker markets (p=0.45).** Markets where the bot is mostly maker have similar balance ratios to markets where it's mostly taker. The bot's market-making doesn't systematically improve or worsen its own balance outcomes.
+43. **CTF Exchange contract filtered from counterparty metrics.** The exchange contract appears as 15.5% of fills (intermediary in OrdersMatched multi-fills) but is not a real counterparty. After filtering: 5,486 real counterparties, HHI 0.007 (fragmented), Gini 0.853, top-10 = 21.1%. Pre-filter numbers (Gini 0.892, top-10 = 42%) were inflated.
+44. **On-chain `fee` field is the TAKER's fee; all fee numbers are approximate.** Maker fills show fee=0 on-chain. Total on-chain fees in sample (~$55K) are taker fees only. Maker rebates ($40.7K) are off-chain Polymarket incentives, not visible in OrderFilled events. **Caveat:** the 22% multi-fill join mismatch (rule 47) means fee and amount aggregations on joined data carry ~22% noise. Treat fee totals as order-of-magnitude estimates, not precise figures.
+45. **Self-impact: no difference detected, but test has low power (p=0.45, 1.5% tx coverage).** With only 1.5% of transactions sampled, per-market maker fractions are noisy. The null result means "can't detect an effect with this sample", not "no effect exists." Consistent with the Phase 4 null result (rule 24) but not independent confirmation. A full census (all 1.3M txs) would provide much higher power.
 46. **Public Polygon RPCs don't support historical `eth_getLogs`.** polygon-rpc.com, 1rpc.io, publicnode all fail for historical block ranges. Only `eth_getTransactionReceipt` works for historical txs. Collection uses batch receipt fetching (50 receipts per JSON-RPC batch on drpc.org, ~1s/batch). 20K tx sample takes ~7 min.
 47. **22% decode cross-check mismatch is from multi-fill tx join ambiguity.** When a tx has multiple OrderFilled events with the same asset_id, the join to trades can match the wrong fill within the tx. This does NOT affect maker/taker classification (bot_role is per-fill, not per-amount). The 78% match rate confirms the decode logic is correct.
+48. **Bot-vs-human counterparty classification is heuristic and approximate.** Thresholds (fills > 1000 OR fills_per_hour > 10) are arbitrary. The `time_span` calculation (last_seen − first_seen) from a 20K sample may not capture a counterparty's true activity window. Treat "likely bot" / "likely human" labels as rough indicators, not ground truth. For better classification, would need full census data or on-chain behavioral analysis.
 
 ---
 
@@ -500,9 +501,9 @@ Fill count has strong independent predictive power for balance quality (r=+0.48 
 - **87.3% maker / 12.7% taker** — the bot is overwhelmingly a liquidity provider
 - BUY side 93.7% maker, SELL side 56.2% maker — passive buys, active loss-cutting sells
 - SOL/XRP 94-96% maker, BTC/ETH ~86% — thinner books = more maker fills
-- 5,487 unique counterparties, Gini 0.892, HHI fragmented, top-10 = 42% volume
-- Top "counterparty" is CTF Exchange contract itself (intermediary in multi-fills)
-- Total on-chain fees in sample: $54.9K (taker-only); maker rebates: $40.7K (off-chain)
+- 5,486 real counterparties (exchange contract filtered out), Gini 0.853, HHI 0.007 (fragmented), top-10 = 21.1% volume
+- CTF Exchange contract was 15.5% of fills (OrdersMatched intermediary) — excluded from metrics
+- Total on-chain fees in sample: ~$55K approximate (taker-only, 22% join noise); maker rebates: $40.7K (off-chain)
 - Self-impact t-test: p=0.45 (no difference high-maker vs high-taker markets)
 - Full pipeline runs in ~24s (skipping collection); collection takes ~7 min for 20K sample
 

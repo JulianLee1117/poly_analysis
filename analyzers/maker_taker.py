@@ -172,22 +172,22 @@ def analyze_maker_taker(db: Database, completeness_result: dict,
         print("    (completeness data not available)")
 
     # ── 6. Fee analysis ──
-    print(f"\n  6. FEE ANALYSIS")
+    print(f"\n  6. FEE ANALYSIS (approximate — 22% join mismatch noise)")
 
     total_fee = joined['onchain_fee'].sum()
     nonzero_fees = joined[joined['onchain_fee'] > 0]
     avg_fee_rate = (total_fee / total_vol * 100 if total_vol > 0 else 0)
 
-    print(f"    Total fees paid: ${total_fee:,.2f}")
+    print(f"    Total fees paid: ~${total_fee:,.0f} (approximate)")
     print(f"    Fills with fee > 0: {len(nonzero_fees):,} "
           f"({len(nonzero_fees)/n_total*100:.1f}%)")
-    print(f"    Avg fee rate: {avg_fee_rate:.4f}% of volume")
+    print(f"    Avg fee rate: ~{avg_fee_rate:.4f}% of volume")
 
     # Fee by maker/taker
     maker_fee = maker_fills['onchain_fee'].sum()
     taker_fee = taker_fills['onchain_fee'].sum()
-    print(f"    Maker fee total: ${maker_fee:,.2f}")
-    print(f"    Taker fee total: ${taker_fee:,.2f}")
+    print(f"    Maker fee total: ~${maker_fee:,.0f}")
+    print(f"    Taker fee total: ~${taker_fee:,.0f}")
 
     # Fee-adjusted P&L: revise decomposition to 4 components
     with db._get_conn() as conn:
@@ -216,7 +216,9 @@ def analyze_maker_taker(db: Database, completeness_result: dict,
         print(f"      Implied rebate rate: {implied_rebate_rate:.4f}%")
 
     # ── 7. Self-impact re-attribution ──
-    print(f"\n  7. SELF-IMPACT RE-ATTRIBUTION")
+    # NOTE: Low statistical power with 1.5% tx coverage. A null result means
+    # "can't detect effect with this sample", not "no effect exists."
+    print(f"\n  7. SELF-IMPACT RE-ATTRIBUTION (low power — 1.5% sample)")
 
     if not resolved.empty and 'condition_id' in joined.columns:
         # Get price trajectory data split by maker vs taker
@@ -255,6 +257,9 @@ def analyze_maker_taker(db: Database, completeness_result: dict,
                     high_taker['balance_ratio'],
                     equal_var=False)
                 print(f"    Balance diff t-test: t={t_stat:.2f}, p={p_val:.4f}")
+                if p_val > 0.05:
+                    print(f"    → Not significant (low power — consistent with "
+                          f"Phase 4 null result, not proof of no effect)")
 
             self_impact_df = mk_merged
         else:

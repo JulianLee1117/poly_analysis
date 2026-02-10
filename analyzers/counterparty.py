@@ -7,7 +7,14 @@ Computes concentration metrics, repeat opponent analysis, bot vs human heuristic
 import numpy as np
 import pandas as pd
 
+from config import CTF_EXCHANGE_ADDRESS, NEGRISK_CTF_EXCHANGE_ADDRESS
 from storage.database import Database
+
+# Exchange contract addresses (not real counterparties)
+_EXCHANGE_CONTRACTS = {
+    CTF_EXCHANGE_ADDRESS.lower(),
+    NEGRISK_CTF_EXCHANGE_ADDRESS.lower(),
+}
 
 
 def analyze_counterparties(db: Database) -> dict:
@@ -30,27 +37,42 @@ def analyze_counterparties(db: Database) -> dict:
         print("  No counterparty data available")
         return {'summary': {}, 'available': False}
 
+    # ── Filter out exchange contracts ──
+    cp['is_exchange'] = cp['counterparty'].str.lower().isin(_EXCHANGE_CONTRACTS)
+    exchange_cp = cp[cp['is_exchange']]
+    cp_real = cp[~cp['is_exchange']].copy()
+
     # ── 1. Universe size ──
     print(f"\n  1. COUNTERPARTY UNIVERSE")
 
-    n_counterparties = len(cp)
-    total_fills = cp['fills'].sum()
-    total_volume = cp['volume'].sum()
-    total_markets = cp['markets'].max()  # max since markets overlap
+    n_raw = len(cp)
+    n_exchange = len(exchange_cp)
+    exchange_fills = exchange_cp['fills'].sum() if not exchange_cp.empty else 0
+    exchange_vol = exchange_cp['volume'].sum() if not exchange_cp.empty else 0
 
-    print(f"    Unique counterparties: {n_counterparties:,}")
-    print(f"    Total matched fills:   {total_fills:,}")
-    print(f"    Total matched volume:  ${total_volume:,.0f}")
+    n_counterparties = len(cp_real)
+    total_fills = cp_real['fills'].sum()
+    total_volume = cp_real['volume'].sum()
+    total_markets = cp_real['markets'].max()  # max since markets overlap
+
+    print(f"    Raw counterparty addresses: {n_raw:,}")
+    if n_exchange > 0:
+        print(f"    Exchange contract fills:    {exchange_fills:,} "
+              f"({exchange_fills/(exchange_fills+total_fills)*100:.1f}%) — "
+              f"filtered out")
+    print(f"    Real counterparties:        {n_counterparties:,}")
+    print(f"    Total matched fills:        {total_fills:,}")
+    print(f"    Total matched volume:       ${total_volume:,.0f}")
 
     # ── 2. Concentration metrics ──
     print(f"\n  2. CONCENTRATION METRICS")
 
-    # Volume shares
-    cp['volume_share'] = cp['volume'] / total_volume
-    cp['fill_share'] = cp['fills'] / total_fills
+    # Volume shares (on real counterparties only)
+    cp_real['volume_share'] = cp_real['volume'] / total_volume
+    cp_real['fill_share'] = cp_real['fills'] / total_fills
 
     # HHI (Herfindahl-Hirschman Index) — sum of squared market shares
-    hhi = (cp['volume_share'] ** 2).sum()
+    hhi = (cp_real['volume_share'] ** 2).sum()
     hhi_normalized = (hhi - 1/n_counterparties) / (1 - 1/n_counterparties) \
         if n_counterparties > 1 else 1.0
 
@@ -64,7 +86,8 @@ def analyze_counterparties(db: Database) -> dict:
         print(f"    → Highly concentrated (HHI > 0.15)")
 
     # Top-N share
-    cp_sorted = cp.sort_values('volume', ascending=False).reset_index(drop=True)
+    cp_sorted = cp_real.sort_values('volume', ascending=False).reset_index(
+        drop=True)
     top1_share = cp_sorted.iloc[0]['volume_share'] * 100
     top10_share = cp_sorted.head(10)['volume_share'].sum() * 100
     top50_share = cp_sorted.head(50)['volume_share'].sum() * 100
@@ -74,8 +97,8 @@ def analyze_counterparties(db: Database) -> dict:
     print(f"    Top-50 share: {top50_share:.1f}%")
 
     # Gini coefficient
-    n = len(cp)
-    sorted_volumes = np.sort(cp['volume'].values)
+    n = len(cp_real)
+    sorted_volumes = np.sort(cp_real['volume'].values)
     index = np.arange(1, n + 1)
     gini = (2 * np.sum(index * sorted_volumes) / (n * np.sum(sorted_volumes))
             - (n + 1) / n)
@@ -122,12 +145,12 @@ def analyze_counterparties(db: Database) -> dict:
     fill_brackets = [(1, 1), (2, 10), (11, 100), (101, 1000), (1001, None)]
     for lo, hi in fill_brackets:
         if hi:
-            mask = (cp['fills'] >= lo) & (cp['fills'] <= hi)
+            mask = (cp_real['fills'] >= lo) & (cp_real['fills'] <= hi)
             label = f"{lo:,}-{hi:,}"
         else:
-            mask = cp['fills'] >= lo
+            mask = cp_real['fills'] >= lo
             label = f"{lo:,}+"
-        bracket_cp = cp[mask]
+        bracket_cp = cp_real[mask]
         n_bracket = len(bracket_cp)
         vol_bracket = bracket_cp['volume'].sum()
         print(f"      {label:>10s} fills: {n_bracket:,} counterparties, "
@@ -137,7 +160,9 @@ def analyze_counterparties(db: Database) -> dict:
     print(f"\n  5. BOT vs HUMAN CLASSIFICATION")
 
     # For counterparties with >50 fills, compute activity metrics
-    active_cp = cp[cp['fills'] > 50].copy()
+    # NOTE: thresholds (fills>1000, fills_per_hour>10) are heuristic;
+    # time_span from 20K sample is noisy. Classification is approximate.
+    active_cp = cp_real[cp_real['fills'] > 50].copy()
 
     if not active_cp.empty:
         active_cp['time_span_hours'] = (
@@ -158,6 +183,7 @@ def analyze_counterparties(db: Database) -> dict:
         human_volume = active_cp[~active_cp['likely_bot']]['volume'].sum()
 
         print(f"    Active counterparties (>50 fills): {len(active_cp):,}")
+        print(f"    (Heuristic classification — thresholds are approximate)")
         print(f"    Likely bots: {n_likely_bot:,} "
               f"(${bot_volume:,.0f}, "
               f"{bot_volume/total_volume*100:.1f}% of volume)")
@@ -176,7 +202,7 @@ def analyze_counterparties(db: Database) -> dict:
                   f"{bots['time_span_hours'].median():,.0f} hours")
 
         # Inactive counterparties volume (single interaction)
-        inactive_cp = cp[cp['fills'] <= 50]
+        inactive_cp = cp_real[cp_real['fills'] <= 50]
         inactive_vol = inactive_cp['volume'].sum()
         print(f"\n    Inactive counterparties (<=50 fills): "
               f"{len(inactive_cp):,}")
@@ -204,7 +230,8 @@ def analyze_counterparties(db: Database) -> dict:
         **concentration,
     }
 
-    print(f"\n  Summary: {n_counterparties:,} counterparties, "
+    print(f"\n  Summary: {n_counterparties:,} real counterparties "
+          f"(exchange contracts filtered), "
           f"top-10 = {top10_share:.1f}%, "
           f"Gini = {gini:.3f}")
 
