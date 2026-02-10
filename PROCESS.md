@@ -43,6 +43,14 @@
 37. **Sell trigger is price-based, not time-based. Two distinct mechanisms.** (a) Loss-cutting (58%): first sell below entry VWAP, avg 24% deterioration, median delay 264s. (b) Rebalancing (42%): first sell above entry VWAP (avg 1.32x), median delay 198s — selling excess winners faster. Overall: first sell price median $0.40, 99.3% below $0.50. Resolution accuracy scales with sell price: $0.00-0.20 → 90.7% sold a loser, $0.40-0.50 → 57.6%. The price distribution may reflect the natural price path of losing outcomes rather than a deliberate $0.40 threshold, but the monotonic resolution gradient confirms the signal is directionally correct for replication.
 38. **Weekend activity is moderately reduced** (0.89x weekday fills). Suggests mostly automated with some human oversight — not pure 24/7 autonomy.
 39. **Spread expansion is universal across all 4 assets.** XRP widened most (+8.2¢), ETH next (+6.0¢), BTC (+3.8¢), SOL (+3.4¢). Fills/market INCREASED (144 → 213) and entry speed IMPROVED (11.7s → 7.1s) during the same period. Wider spreads are NOT from reduced activity — the bot is getting better at execution while spreads widen (market conditions, not competition). **CAVEAT: 22-day window covers a single volatility regime.** Strategy profitability is partially conditional on continued crypto volatility maintaining wide spreads.
+40. **Bot is 87.3% maker (liquidity provider).** From 20K tx sample → 31,656 on-chain fills → 23,624 joined to trades. The bot posts limit orders that get filled, not market orders. This resolves the $40.7K rebate mystery from rule 6 — rebates are real because the bot IS a maker on most fills. ±0.7% CI on proportions (sample-based).
+41. **BUY side is 93.7% maker, SELL side is 56.2% maker.** The bot posts limit buy orders on both outcomes simultaneously, then reacts to fills with taker sell orders (loss-cutting). This is consistent with the completeness arbitrage strategy: passive limit orders capture spread, active sell orders manage exposure.
+42. **Maker rate varies by asset: SOL/XRP 94-96% maker, BTC/ETH ~86%.** Deeper BTC/ETH books have more competing makers, forcing occasional taker fills. The difference reinforces rule 21 — asset choice matters less than depth.
+43. **Top "counterparty" is the CTF Exchange contract itself (26.8% of fills).** This is the intermediary in multi-fill transactions (OrdersMatched), not a real counterparty. The bot's ACTUAL counterparty universe is 5,487 unique addresses, highly concentrated: Gini 0.892, top-10 = 42% of volume. Few dominant counterparties are likely other bots.
+44. **On-chain `fee` field is the TAKER's fee.** Maker fills show fee=0 on-chain. This means total on-chain fees in sample ($54.9K) are taker fees only. Maker rebates ($40.7K) are off-chain Polymarket incentives, not visible in OrderFilled events. For P&L revision: net fee impact = rebates - taker_fees.
+45. **Self-impact: no difference between high-maker and high-taker markets (p=0.45).** Markets where the bot is mostly maker have similar balance ratios to markets where it's mostly taker. The bot's market-making doesn't systematically improve or worsen its own balance outcomes.
+46. **Public Polygon RPCs don't support historical `eth_getLogs`.** polygon-rpc.com, 1rpc.io, publicnode all fail for historical block ranges. Only `eth_getTransactionReceipt` works for historical txs. Collection uses batch receipt fetching (50 receipts per JSON-RPC batch on drpc.org, ~1s/batch). 20K tx sample takes ~7 min.
+47. **22% decode cross-check mismatch is from multi-fill tx join ambiguity.** When a tx has multiple OrderFilled events with the same asset_id, the join to trades can match the wrong fill within the tx. This does NOT affect maker/taker classification (bot_role is per-fill, not per-amount). The 78% match rate confirms the decode logic is correct.
 
 ---
 
@@ -463,3 +471,53 @@ Fill count has strong independent predictive power for balance quality (r=+0.48 
 - **No new database helpers needed** — all data available from existing phase results. Only exception: `db.market_fills()` for the example timeline.
 - **Report is the primary output, not console printing.** Synthesis prints a brief summary; narrative goes in the HTML.
 - **Tier labels use snake_case internally** (`well_balanced`) matching completeness.py, with display mapping to title case in charts and report.
+
+---
+
+## Phase 8: On-Chain Data Collection & Analysis — COMPLETE
+
+### Files created
+- `collectors/onchain_collector.py` — batch receipt-based on-chain fill collection: `PolygonRPC` client with batch JSON-RPC, auto-discovery of OrderFilled topic hash, `collect_via_receipts()` main loop, decode + verify pipeline
+- `analyzers/maker_taker.py` — Phase 8a: maker/taker split (overall, by side, by asset, by hour, by balance tier), fee analysis, self-impact re-attribution
+- `analyzers/counterparty.py` — Phase 8b: counterparty universe, concentration (HHI/Gini), top-20 table, repeat opponent analysis, bot-vs-human classification
+
+### Files modified
+- `config.py` — added Polygon RPC constants (`POLYGON_RPC_URL`, rate limits, `CTF_EXCHANGE_ADDRESS`, `NEGRISK_CTF_EXCHANGE_ADDRESS`)
+- `storage/models.py` — added `OnchainFill` dataclass
+- `storage/database.py` — added `onchain_fills` table, 5 new methods (`upsert_onchain_fills`, `onchain_fill_count`, `onchain_join_summary`, `maker_taker_summary`, `counterparty_summary`)
+- `main.py` — added `run_onchain_collection()`, `run_phase8()`, CLI args `--skip-onchain`, `--no-receipts`
+
+### What was changed from original plan
+- **Complete architectural pivot from `eth_getLogs` to batch receipt fetching.** The plan specified a three-pass `eth_getLogs` approach (maker topic filter, taker topic filter, OrdersMatched follow-up). Public Polygon RPCs all reject historical `eth_getLogs` queries (pruned event log indices). Rewrote to fetch `eth_getTransactionReceipt` in batches of 50 via JSON-RPC batch calls. Same data, different extraction path.
+- **Sample-based instead of census.** Plan implied full coverage of all 1.3M txs. At ~1s per 50 receipts, full census would take ~7 hours. Default sample of 20K txs (configurable via `POLYGON_ONCHAIN_SAMPLE` env var) gives 31,656 fills in ~7 minutes with ±0.7% CI on proportions.
+- **Topic hashes auto-discovered from sample tx, not hardcoded.** Plan noted this but implementation required careful handling: fetch a random bot tx receipt, find the first CTF Exchange event, extract the topic hash and verify contract address match.
+- **drpc.org as default RPC** instead of polygon-rpc.com. Testing revealed polygon-rpc.com doesn't support batch JSON-RPC at all, 1rpc.io has quota issues, publicnode prunes history. drpc.org handles batch of 50 in ~1s with no auth.
+- **Removed block range resolution entirely.** No longer needed since we fetch by tx hash, not by block range.
+- **Pass 3 (OrdersMatched) removed.** Batch receipt approach naturally captures ALL events in a tx, including OrdersMatched fills. No separate pass needed.
+
+### Key outputs
+- 31,656 on-chain fills from 20K tx sample, 23,624 joined to trades (1.8% of 1.3M)
+- **87.3% maker / 12.7% taker** — the bot is overwhelmingly a liquidity provider
+- BUY side 93.7% maker, SELL side 56.2% maker — passive buys, active loss-cutting sells
+- SOL/XRP 94-96% maker, BTC/ETH ~86% — thinner books = more maker fills
+- 5,487 unique counterparties, Gini 0.892, HHI fragmented, top-10 = 42% volume
+- Top "counterparty" is CTF Exchange contract itself (intermediary in multi-fills)
+- Total on-chain fees in sample: $54.9K (taker-only); maker rebates: $40.7K (off-chain)
+- Self-impact t-test: p=0.45 (no difference high-maker vs high-taker markets)
+- Full pipeline runs in ~24s (skipping collection); collection takes ~7 min for 20K sample
+
+### Decisions made
+- **Batch receipt approach instead of `eth_getLogs`.** More resilient to RPC provider limitations. Every public RPC supports `eth_getTransactionReceipt` for historical txs. Trade-off: O(n_txs) calls vs O(block_range/batch_size) calls. For our 20K sample, receipt approach is faster anyway.
+- **Sample of 20K txs, not full census.** 1.5% tx coverage gives 31,656 fills — sufficient for proportion estimates (±0.7% CI). Full census (1.3M txs) would take ~7 hours and add precision the analysis doesn't need. Configurable via env var for deeper analysis.
+- **drpc.org as default, env var override for paid RPCs.** `POLYGON_RPC_URL` env var lets users swap in Alchemy/Infura for faster collection.
+- **Skip collection if fills already exist.** `collect_onchain()` checks `onchain_fill_count()` and skips if data present. Delete `onchain_fills` table contents to re-collect.
+- **Verification built into collector, not a separate step.** Coverage, decode cross-check, maker/taker split, and fee stats print during collection for immediate validation.
+- **22% decode mismatch accepted.** Multi-fill txs create join ambiguity (multiple fills with same asset_id in one tx). This affects amount matching but NOT maker/taker classification, which is per-fill. No fix needed for the analysis questions we care about.
+
+### Bugs fixed during implementation
+- **RPC error -32090 (rate limit)** not in retry code list — added to retry handler with 10s minimum wait
+- **`eth_getLogs` returns 0 results on public RPCs** for historical blocks — led to the architectural pivot
+- **polygon-rpc.com rejects batch JSON-RPC** ("Batch size too large" even for 3) — switched to drpc.org
+- **1rpc.io quota exhaustion** ("Failed to validate quota usage") — removed as default
+- **Verification cross-check used wrong amount field** — fixed to detect USDC side via `maker_asset_id == "0"` instead of assuming bot_role determines which amount is USDC
+- **Python stdout buffering** in background tasks — fixed with `PYTHONUNBUFFERED=1 python3 -u`

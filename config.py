@@ -34,11 +34,11 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MARKET_BATCH_SIZE = 20
 
 # Polygon RPC (on-chain data collection)
-POLYGON_RPC_URL = os.environ.get("POLYGON_RPC_URL", "https://polygon-rpc.com")
-POLYGON_RPC_RATE_LIMIT = float(os.environ.get("POLYGON_RPC_RATE_LIMIT", "2.0"))
-POLYGON_RPC_BURST = 3
-POLYGON_RPC_BATCH_SIZE = 3000  # blocks per eth_getLogs call
-POLYGON_RPC_MAX_RETRIES = 5
+POLYGON_RPC_URL = os.environ.get("POLYGON_RPC_URL", "https://polygon.drpc.org")
+POLYGON_RPC_RATE_LIMIT = float(os.environ.get("POLYGON_RPC_RATE_LIMIT", "1.0"))
+POLYGON_RPC_BURST = 1
+POLYGON_RPC_BATCH_SIZE = 1000  # blocks per eth_getLogs call
+POLYGON_RPC_MAX_RETRIES = 8
 
 # CTF Exchange contracts (Polymarket on Polygon)
 CTF_EXCHANGE_ADDRESS = "0x4bfb41d5b3570DeFd03C39a9A4D8dE6Bd8B8982E"
