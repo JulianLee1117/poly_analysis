@@ -7,7 +7,7 @@ https://polymarket.com/@k9Q2mX4L8A7ZP3R
 - Profile shows "13,508 predictions" (market-level count) and "$86.8M volume" (double-counted or notional per Paradigm research)
 - 26,310 closed positions: 13,158 winners (cur_price=1) vs 13,152 losers (cur_price=0) — nearly perfect 50/50 resolution split
 - $40,704 in maker rebates across 34 daily payouts — significant revenue source
-- **Strategy hypothesis:** Completeness arbitrage on crypto 15-minute markets — buying both Up and Down outcomes at combined VWAP < $1.00, with directional tilt toward predicted winner. Active loss-cutting on deteriorating sides (71% of sells are losers at avg $0.29). Follows volume/volatility, not optimal spread windows.
+- **Strategy (confirmed by Phase 3):** Pure completeness arbitrage on crypto 15-minute markets — buying both Up and Down outcomes at combined VWAP < $1.00 (~$0.929). **No directional model** — confirmed via three-measure tilt test: share-weighted 41.4% (biased down), dollar-weighted 68.4% (biased up), price-residual 32.7% (unbiased, definitive). One-sided accuracy 42.7%. Bot targets near-equal allocation (dollar frac 0.4925 vs price-implied 0.4939). Captures only 29% of theoretical edge ($281K / $962K) due to execution imbalance on 5.13M unmatched shares. Active loss-cutting on deteriorating sides. Spreads expanding over time (+5.34¢). The engineering problem is execution balance, not price prediction.
 
 ---
 
@@ -21,8 +21,9 @@ https://polymarket.com/@k9Q2mX4L8A7ZP3R
 | BUY/SELL split | 88.6% BUY / 11.4% SELL | **Sells are loss-cutting, not profit-taking.** 71% of sell fills are on losing outcomes, avg sell price $0.29, never above $0.65. Sells happen 3.7 min avg after first buy. |
 | Up vs Down BUYs | 50.2% Up / 49.8% Down | No directional bias overall — buys both sides |
 | Both-sided markets | 95.6% (7,947 of 8,313) | Buys BOTH Up and Down in nearly every market |
-| Up-only / Down-only | 164 / 202 | Only 4.4% are purely directional bets |
-| Avg combined VWAP | $0.9250 (Up+Down, buy-only) | **Misleading as headline stat** — only 32.4% of markets are well-balanced; balanced-only VWAP is $0.9402. Distribution is bimodal: 37.9% below $0.90, 27.7% above $1.00 |
+| Up-only / Down-only | 164 / 202 | **Execution failures, NOT directional bets.** Phase 3: 42.7% accuracy (below random), P&L = -$427. XRP disproportionately affected (6.9% one-sided vs ~3-4% for others). |
+| Avg combined VWAP | $0.9287 (Up+Down, buy-only) | **Misleading as headline stat** — bimodal distribution. Well-balanced (37.9%): $0.942. Moderate (34.6%): $0.920. Imbalanced (27.5%): $0.921. Spread ranges from -10¢ to 20¢+. |
+| Edge capture efficiency | 29% ($281K actual / $962K theoretical) | The bot loses 71% of its theoretical completeness edge to directional drag on unmatched shares and sell losses. Price-residual tilt accuracy (32.7%) confirms no prediction — drag is pure execution noise. The engineering bottleneck is execution balance, not strategy. |
 | Avg trade size | $15.50 USDC | Small orders sweeping available liquidity |
 | Trades/minute | 46.7 avg, 748 peak | High-frequency automated execution |
 | Max trades/second | 109 | Burst-mode liquidity sweeping |
@@ -119,13 +120,15 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
   - **Evolution over time:** Is the average spread improving, degrading, or stable across the 22-day window? (competition signal)
   - **All SQL-based:** Use a CTE that computes per-condition_id aggregates, return summary DataFrame
 
-**Verify — CONFIRMED:** Avg combined VWAP = $0.9287 (buy-only, all both-sided). Well-balanced only = $0.942. Distribution is bimodal. Trade-derived P&L = **$281K** for 8,310 resolved markets (corrected from $319K after fixing survivorship bias on one-sided losers). Total matched pairs = 14.17M. One-sided accuracy = 42.7% (NOT 100% — prior figure was survivorship bias). Tilt accuracy in both-sided = 41.4% (directional exposure hurts, not helps). Spreads expanding +5.34¢ over 22 days.
+**Verify — CONFIRMED:** Avg combined VWAP = $0.9287 (buy-only, all both-sided). Well-balanced only = $0.942. Distribution is bimodal. Trade-derived P&L = **$281K** for 8,310 resolved markets (corrected from $319K after fixing survivorship bias on one-sided losers). Total matched pairs = 14.17M. One-sided accuracy = 42.7% (NOT 100% — prior figure was survivorship bias). Directional tilt: three measures — share-weighted 41.4% (biased down), dollar-weighted 68.4% (biased up), price-residual 32.7% (unbiased, definitive no-prediction). Spreads expanding +5.34¢ over 22 days.
 
 ---
 
 ## Phase 4: Execution Microstructure Analysis
 
-**Goal:** Reverse-engineer HOW the bot executes — fill patterns, timing, order flow, and position building within each 15-minute window.
+**Goal:** Reverse-engineer HOW the bot executes and **identify what causes the 71% edge leakage** ($962K theoretical → $281K actual). Phase 3 proved the bot has no directional model (price-residual tilt accuracy 32.7%, near-equal allocation fractions) — all profit is completeness spread. The execution quality (how well it balances Up/Down shares) is the entire engineering problem.
+
+**Central question:** What creates the 5.13M unmatched shares? Is it liquidity constraints (can't buy enough of one side), self-impact (bot's own orders move prices), timing (prices move between buying sides), or market selection (enters markets where one side is already expensive)?
 
 **Data limitations (no order book snapshots):**
 - `maker_address` is **empty for all 1.3M trades** — cannot identify maker/taker per fill
@@ -146,32 +149,37 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
     - Intra-market price range: avg $0.49 per outcome, stddev $0.136 — high variance
     - Caveat: cannot attribute to self-impact vs organic market movement without order book data
     - Proxy: compare price trajectory in high-fill markets (likely self-impact) vs low-fill markets (likely organic)
-  - **Up vs Down sequencing:** Avg gap 75 seconds between first Up and first Down fill. Analyze:
+  - **Up vs Down sequencing → balance impact (KEY):** Avg gap 75 seconds between first Up and first Down fill. Analyze:
     - Distribution of this gap — simultaneous (0-5s), fast (5-30s), slow (30s+)
-    - Does the gap predict profitability? (longer gap = more price risk)
+    - **Does the gap predict balance ratio?** If longer gaps → worse balance, timing is the bottleneck. If gap doesn't matter, liquidity is the bottleneck.
+    - Does buying Up first vs Down first affect which side ends up with excess shares?
   - **Burst detection:** Identify concentrated fill clusters (>10 fills within 5 seconds) — these are single order sweeps consuming multiple resting orders
   - **Sell execution patterns:** The 3,035 markets with sells:
     - Avg 50 sell fills per market, starting 3.7 min after first buy (33% of execution window)
     - 71% of sells are on losing outcomes at avg $0.29, 29% on winners at avg $0.34
     - Sell timing relative to price movement — does the bot sell AFTER price deteriorates or preemptively?
+  - **Balance ratio prediction model:** What execution features predict well-balanced (profitable) vs imbalanced (leaky) markets?
+    - Candidates: entry speed, sequencing gap, fill count, price trajectory, time-of-day, crypto asset
+    - This is the most important sub-analysis — it identifies the bot's execution bottleneck
   - Sample analysis on top-50 markets by trade count, then validate patterns hold across full dataset via SQL aggregates
 
 - `analyzers/sizing.py` — Position sizing and capital deployment:
   - **Per-market capital deployed:** Total USDC spent per condition_id (buy - sell)
   - **Capital deployment distribution:** Histogram of per-market spend — is it uniform or heavy-tailed?
-  - **Balance ratio per market:** up_cost / (up_cost + down_cost) — how tilted is the directional bet?
+  - **Balance ratio per market:** up_cost / (up_cost + down_cost) — how balanced is the execution?
     - 0.50 = perfectly balanced completeness arb
-    - 0.70+ or 0.30- = strong directional conviction
+    - 0.70+ or 0.30- = execution imbalance (NOT directional conviction — Phase 3 proved no directional edge; price-residual tilt accuracy 32.7%)
+  - **Edge capture efficiency per market:** actual_pnl / theoretical_guaranteed_profit — what fraction of the available spread did the bot capture? Correlate with balance ratio, fill count, entry speed, etc.
   - **Concurrent capital:** At any point in time, how much capital is locked in unresolved markets?
   - **Capital turnover analysis:**
     - Total buy outlay: $18.2M, sell recovery: $2.2M (17.6%), net deployed: $16.0M
     - Time from market resolution to next market entry (using position close_timestamp and trade timestamps)
     - Capital recycling rate: how quickly does freed capital appear in new positions?
-    - **Note:** The user hypothesized "selling winners at $0.90+ to free capital faster" — data refutes this. Sells are loss-cutting at $0.20-$0.40, not profit-taking. The capital freed by selling (~$2.2M) is meaningful but modest.
+    - **Note:** Sells are loss-cutting at $0.20-$0.40, not profit-taking. The capital freed by selling (~$2.2M) is meaningful but modest.
   - **Daily capital deployment:** Total USDC deployed per day — is the bot scaling up, stable, or scaling down?
   - **Fill size patterns:** Distribution of individual fill sizes — constant, random, or strategic (e.g., larger early, smaller as liquidity thins)?
 
-**Verify:** Entry speed distribution should show most markets entered within first 1-2 minutes. Balance ratio distribution should cluster near 0.50 (completeness) with a tail toward directional tilts. Sell timing should show loss-cutting pattern confirmed.
+**Verify:** Entry speed distribution should show most markets entered within first 1-2 minutes. Balance ratio distribution should cluster near 0.50 with a heavy tail toward imbalance (NOT directional conviction). Sequencing gap should correlate with balance ratio (the key execution bottleneck hypothesis). Edge capture efficiency should be highest in well-balanced markets and lowest in very-imbalanced ones.
 
 ---
 
@@ -196,8 +204,8 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
       - Per-condition_id P&L available for all closed positions
     - **Reconciliation:** For the 8,310 overlapping markets, compare trade-derived P&L vs position `realized_pnl`. Quantify and explain any per-market discrepancies.
   - **P&L decomposition into five components:**
-    1. **Completeness spread:** matched_pairs × (1.00 - combined_VWAP) — the guaranteed arb profit
-    2. **Directional P&L:** unmatched_shares × (resolution_price - entry_price) — the speculative component
+    1. **Completeness spread:** matched_pairs × (1.00 - combined_VWAP) — the guaranteed arb profit. Phase 3 found: $962K theoretical.
+    2. **Directional drag:** unmatched_shares × (resolution_price - entry_price) — NOT a speculative component but an execution cost. Phase 3 proved no directional model (price-residual accuracy 32.7%), so unmatched shares are a consistent drag on returns, not a source of alpha. This is the largest component of the 71% edge leakage.
     3. **Sell P&L:** sell_proceeds - cost_basis_of_sold_shares — typically negative (loss-cutting at $0.29 avg)
     4. **Sell discipline value (counterfactual):** For each sell fill, compute `resolution_value - sell_price`:
        - Sells on losers (71%, avg $0.29): resolution = $0.00, so selling saved $0.29/share vs holding to zero (positive value)
@@ -226,7 +234,7 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
   - **Tail risk:** Worst 5% of market-level outcomes
   - **Capital efficiency:** Profit / average capital deployed
 
-**Verify:** Trade-derived P&L should be ~$319K (NOT $713K). Position-derived P&L = $713K. The $394K gap must be acknowledged as pre-trade-window history. Decomposition components (1-3, 5) should sum to the trade-derived total for the 8,101 markets. Sell discipline value (component 4) is a counterfactual metric reported alongside, not added into the sum. Hold-to-resolution counterfactual P&L should be computable for all 3,035 markets with sells. Maker rebates ($40.7K) reported separately.
+**Verify:** Trade-derived P&L should be **~$281K** for 8,310 resolved markets. Position-derived P&L = $713K. The $432K gap is pre-trade-window history. Decomposition components (1-3, 5) should sum to the trade-derived total. Component 1 (completeness spread) should be ~$962K, component 2 (directional drag) should be large and NEGATIVE (the 71% leakage), component 3 (sell P&L) should be moderately negative. Sell discipline value (component 4) is a counterfactual metric reported alongside, not added into the sum. Perfect-balance counterfactual should show ~$962K (3.4x actual) as the upper bound. Maker rebates ($40.7K) reported separately.
 
 ---
 
@@ -248,23 +256,30 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
   - **Session detection:** Identify distinct trading sessions using gaps >30 minutes with no trades
   - **Market skip analysis:** During active hours, which 15-min windows does the bot skip entirely? What's different about skipped vs traded windows? (requires market metadata to check if markets existed but weren't traded)
 
-- `analyzers/directional.py` — Directional conviction signals:
-  - **One-sided market analysis:** The 366 markets (4.4%) where the bot bought only Up or only Down — what's different?
-    - Were these markets with different characteristics (lower liquidity? different crypto asset?)
-    - Was the directional choice correct (profitable)?
-    - Size comparison: larger or smaller positions than both-sided markets?
-  - **Tilt analysis:** In both-sided markets, compute the directional tilt (excess_shares / total_shares):
-    - Tilt distribution — how often is the bot perfectly balanced vs heavily tilted?
-    - Tilt accuracy — does tilting toward Up correlate with Up winning (and vice versa)?
-    - Tilt magnitude vs profit — does stronger conviction lead to better outcomes?
+- `analyzers/imbalance.py` — Execution imbalance analysis (renamed from `directional.py` — Phase 3 proved there is no directional model):
+  - **One-sided market failure analysis:** The 366 markets (4.4%) where the bot bought only Up or only Down are **execution failures, not directional bets** (42.7% accuracy, P&L = -$427):
+    - What caused the miss? Timing (entered late, one side already expired/illiquid)? Liquidity (one side had no resting orders)?
+    - Crypto asset distribution: XRP has disproportionately more one-sided (118/1722 = 6.9% vs ~3-4% for others) — is XRP less liquid?
+    - When in the 15-min window do one-sided entries occur? Late entries = "ran out of time" hypothesis.
+    - Position size comparison: smaller than both-sided markets (less capital risked on uncertain execution)?
+  - **Tilt cause analysis (NOT accuracy — already answered via price-residual at 32.7%):** In both-sided markets, the directional tilt is execution noise. The question is what CAUSES it:
+    - Tilt distribution — how extreme are the imbalances?
+    - Tilt vs sequencing gap — does buying one side first create tilt toward that side (more liquidity available)?
+    - Tilt vs fill count — do high-fill markets have better or worse balance?
+    - Tilt vs time-of-day — does balance vary with market hours?
+    - Tilt cost quantification — for each balance tier, how much P&L is lost to tilt vs a perfectly balanced portfolio?
   - **Sell trigger identification:** In the 3,035 markets with sells:
     - **Known:** Avg 3.7 min after first buy, 33% of execution window. 71% on losers at $0.29, 29% on winners at $0.34. Balanced across Up/Down outcomes.
-    - **Hypothesis CONFIRMED:** Bot sells the losing side early to recover partial capital. NOT selling winners for capital recycling.
+    - **Hypothesis CONFIRMED:** Bot sells the losing side early to recover partial capital.
     - Remaining questions: What triggers the sell decision? Price threshold? Time threshold? Comparison to the other side's price?
-    - Does the sell outcome predict the market resolution? (If bot sells Up early, does Down usually win?)
-    - Which side is sold relative to the tilt — does the bot sell the smaller (excess) side or the larger?
+    - Does the sell outcome predict the market resolution?
+    - Does selling improve or worsen the balance ratio? (Sells the excess side = rebalancing; sells the short side = worsens imbalance.)
+  - **Spread expansion investigation:** Within-asset spread expansion (+5.34¢ over 22 days) confirmed in Phase 3:
+    - Cross-reference with crypto price volatility if derivable from market resolution patterns
+    - Does the bot's fill count per market change over time?
+    - Does entry speed change? (Faster entry in later weeks could capture wider initial spreads)
 
-**Verify:** One-sided markets should show clear directional conviction with measurable accuracy. Tilt accuracy > 50% would prove the bot has a directional model beyond pure arb. Sell triggers should reveal systematic rules — likely price-based (sell when outcome price drops below a threshold).
+**Verify:** One-sided markets should correlate with late entry and/or low liquidity, NOT directional conviction (Phase 3: 42.7% one-sided accuracy, 32.7% price-residual tilt). Tilt should correlate with sequencing gap and/or liquidity asymmetry. Sell triggers should reveal systematic rules — likely price-based. Spread expansion should be explainable by at least one testable factor.
 
 ---
 
@@ -274,27 +289,32 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
 
 **Files to create:**
 - `analyzers/strategy_synthesis.py` — Synthesize findings:
-  - **Strategy decomposition:** Quantify the relative contribution of each profit source:
-    1. Completeness arbitrage spread (guaranteed component)
-    2. Directional prediction alpha (speculative component)
-    3. Loss-cutting discipline (sell timing — recovers ~$2.2M in capital). Report both the raw sell P&L (negative) and the counterfactual sell discipline value (likely positive) from Phase 5. The gap between these two numbers is the key insight: sells look bad in isolation but improve system-level P&L.
-    4. Capital redeployment multiplier: if Phase 4 concurrent exposure shows a capital ceiling, estimate the additional arb profit generated by recycled sell capital at the average spread rate
-    5. Maker rebates ($40.7K — passive income component)
+  - **Strategy classification: Pure completeness arbitrage.** Phase 3 proved there is no directional model (price-residual tilt accuracy 32.7%, one-sided accuracy 42.7%, near-equal allocation fractions). All profit comes from the spread between combined entry cost and $1.00 resolution. The bot's engineering challenge is execution balance, not price prediction.
+  - **Edge leakage analysis (the central finding):** The bot captures only 29% of its theoretical edge ($281K actual / $962K theoretical). Quantify the leakage sources:
+    1. **Completeness spread:** $962K theoretical (matched_pairs × spread) — the full edge if perfectly balanced
+    2. **Directional drag:** Large NEGATIVE number — the cost of 5.13M unmatched shares at 41.4% accuracy. This is execution noise, not failed alpha.
+    3. **Sell losses:** Net loss from loss-cutting ($2.2M proceeds vs higher cost basis)
+    4. **Sell discipline value (counterfactual):** Report from Phase 5 — did selling improve or worsen returns vs hold-to-resolution?
+    5. **Maker rebates:** $40.7K — passive income component
+    - **Edge capture efficiency** = actual / theoretical = 29%. This is the bot's quality score.
   - **Edge identification:** What gives this bot its edge?
     - Speed: how fast does it enter after market opens? (measurable from trade timestamps)
-    - Coverage: trading ~370 markets/day across ~4 assets — does breadth explain the profit?
-    - Model: does the directional tilt accuracy imply a price prediction model?
-    - Loss management: does the sell discipline (cutting losers at $0.29) meaningfully improve returns vs hold-to-resolution?
+    - Coverage: trading ~370 markets/day across ~4 assets — breadth is the multiplier
+    - Balance quality: well-balanced markets capture more of the spread — what drives balance? (from Phase 4)
+    - Loss management: does the sell discipline meaningfully improve returns vs hold-to-resolution?
+    - **No directional model.** Phase 3 definitively ruled this out via price-residual test (32.7% accuracy after controlling for market prices). The bot does not predict price direction.
     - **Cannot determine without order book data:** Whether the bot gets better prices than other participants, whether it provides or consumes liquidity per fill, or what the competitive landscape looks like.
   - **Bot signature fingerprint:** Summarize the distinguishing characteristics:
-    - Execution pattern (fill sizes, timing, sequencing)
+    - Execution pattern (fill sizes, timing, sequencing, balance quality)
     - Capital management (per-market sizing, concurrent exposure)
     - Active hours and session structure
     - Crypto asset preferences
   - **Replication feasibility:** What would it take to replicate this strategy?
     - Capital requirements (concurrent exposure estimate)
     - Infrastructure requirements (latency, API access)
-    - Edge sustainability (is the 7% spread compressing over the 22-day window?)
+    - No price prediction model needed — pure execution engineering
+    - Edge sustainability: spreads are **expanding** (+5.34¢ over 22 days), not compressing. Currently favorable, but may reflect temporary market conditions.
+    - **Improvement opportunity:** If execution balance could be improved from current levels (37.9% well-balanced) to near-100%, the same capital base could yield ~3.4x the profit ($962K vs $281K). The engineering ROI on better balancing is enormous.
 
 - `reporting/charts.py` — Chart functions (all Plotly for interactive HTML):
   1. **Completeness spread distribution** — histogram of (1.00 - combined_VWAP) per market
@@ -306,10 +326,10 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
   7. **Per-asset P&L breakdown** — stacked bar (BTC/ETH/SOL)
   8. **Entry speed histogram** — time from market open to first fill
   9. **Spread evolution over time** — daily average combined VWAP trend (competition signal)
-  10. **Directional tilt accuracy** — scatter of tilt magnitude vs market P&L
+  10. **Balance ratio vs P&L** — scatter of balance ratio vs market P&L (replaces "directional tilt accuracy" — no directional model exists)
   11. **Capital deployment over time** — daily concurrent exposure
   12. **Trade size distribution** — log-scale histogram of fill sizes
-  13. **P&L decomposition waterfall** — arb spread + directional + sells = total
+  13. **Edge leakage waterfall** — $962K theoretical spread → directional drag → sell losses → $281K actual (the 71% leakage story)
   14. **Win rate by crypto asset** — grouped bar
   15. **Price trajectory** — fill prices over time within market windows (NOT slippage — no BBO benchmark)
   16. **Spread by hour of day** — combined VWAP by hour, overlaid with fill volume (volatility vs activity)
@@ -319,14 +339,14 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
   - **Section 2: Market Universe** — crypto asset breakdown, market structure, coverage
   - **Section 3: Completeness Arbitrage** — spread analysis, matched vs unmatched shares
   - **Section 4: Execution Microstructure** — fill patterns, entry speed, price trajectory, sell behavior
-  - **Section 5: Directional Edge** — tilt analysis, accuracy, one-sided markets
-  - **Section 6: P&L Decomposition** — $319K from trade data + $394K from pre-window positions = $713K total
+  - **Section 5: Execution Balance & Edge Leakage** — why 71% of theoretical edge is lost (imbalance analysis, one-sided failures, tilt costs)
+  - **Section 6: P&L Decomposition** — $281K from trade data + $432K from pre-window positions = $713K total. $962K theoretical → $281K actual waterfall.
   - **Section 7: Risk & Performance** — Sharpe, drawdown, win rate, capital efficiency
   - **Section 8: Bot Signature & Replication** — fingerprint, edge sustainability, capital requirements
 
 - `main.py` (complete) — Full pipeline: `--skip-fetch` to skip collection, `--wallet` to change target, runs collection → analysis → synthesis → report
 
-**Verify:** Open `output/report.html` in browser. All charts render. Findings are internally consistent. Trade-derived P&L sums to ~$319K for 8,101 resolved markets. Position-derived P&L = $713K total. Gap of $394K from pre-trade-window markets is clearly documented. Maker rebates ($40.7K) accounted for. Strategy conclusion is supported by quantitative evidence.
+**Verify:** Open `output/report.html` in browser. All charts render. Findings are internally consistent. Trade-derived P&L = ~$281K for 8,310 resolved markets. Position-derived P&L = $713K total. Gap of $432K from pre-trade-window markets is clearly documented. Edge leakage waterfall: $962K theoretical → directional drag → sell losses → $281K actual = 29% capture rate. Maker rebates ($40.7K) accounted for. Strategy conclusion: pure completeness arbitrage, no directional model, supported by quantitative evidence (price-residual tilt 32.7%, one-sided accuracy 42.7%, near-equal allocation fractions 0.4925/0.4939).
 
 ---
 

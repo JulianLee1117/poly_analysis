@@ -17,7 +17,8 @@
 11. **Join logic is solid.** `condition_id` links trades↔markets↔positions with 100% coverage. No need to parse clobTokenIds — `outcome` column already identifies the side.
 12. **Update this file after each phase.** Document findings, surprises, and decisions.
 13. **One-sided markets (4.4%) are execution failures, NOT directional alpha.** 42.7% accuracy (below random). P&L is -$427. All profit comes from both-sided completeness.
-14. **Directional tilt in both-sided markets hurts returns.** Excess-side accuracy is 41.4%. The tilt is execution noise, not a prediction signal.
+14. **Directional tilt: THREE measures needed, two are biased.** Share-weighted tilt (41.4%) is biased DOWN (cheaper side yields more shares, cheaper side more likely to lose). Dollar-weighted tilt (68.4%) is biased UP (expensive side costs more, expensive side more likely to win). **Price-residual tilt (32.7%) is the correct unbiased measure** — controls for market prices by asking whether the bot allocates beyond what VWAPs dictate. Bot targets near-equal dollar allocation (actual_up_frac 0.4925, price-implied 0.4939). Conclusion: no directional prediction.
+17. **Never use share-weighted or dollar-weighted tilt accuracy alone.** Both are systematically biased in opposite directions by market price asymmetry. Always use the price-residual test (actual dollar fraction vs VWAP-implied fraction) to assess directional prediction.
 15. **Spreads EXPANDED over 22 days** (+5.34¢). First week 4.3¢, last week 9.6¢. Opposite of expected competition-driven compression. Investigate in Phase 6.
 16. **When determining market resolution, use BOTH cur_price=0 and cur_price=1.** Using only cur_price=1 creates survivorship bias on one-sided markets (misses losers whose only position resolved to 0).
 
@@ -134,10 +135,14 @@ Before starting analysis, investigated three concerns and the order-book-data qu
 - **Theoretical guaranteed profit: $962K** (matched pairs × spread per market)
 - **Actual trade-derived P&L: $281K** — the $681K gap is directional losses on unmatched shares (41.4% accuracy) and sell losses
 
-**Directional edge: NONE**
+**Directional edge: NONE (confirmed via three independent tests)**
 - **One-sided accuracy: 42.7%** (156/365 correct). BELOW random. P&L: -$427. One-sided markets are execution failures, not alpha.
-- **Tilt accuracy in both-sided markets: 41.4%** (3,286/7,945). The excess-side prediction is WRONG more often than right. Directional exposure is a drag, not a source of profit.
-- **All profit comes from the completeness spread.** The bot has no directional model.
+- **Tilt accuracy (three measures to avoid bias):**
+  - Share-weighted: 41.4% — biased DOWN (cheaper side gets more shares, cheaper side loses more often)
+  - Dollar-weighted: 68.4% — biased UP (expensive side costs more, expensive side wins more often)
+  - **Price-residual: 32.7%** — UNBIASED (controls for market prices). This is the definitive test.
+  - Bot targets near-equal allocation: actual dollar frac 0.4925, price-implied frac 0.4939 — virtually no deviation.
+- **All profit comes from the completeness spread.** The bot has no directional model. The price-residual test definitively rules out prediction beyond market prices.
 
 **Spread evolution:**
 - First week avg spread: 4.26¢

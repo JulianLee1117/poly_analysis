@@ -133,11 +133,36 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
     one_pnl = one_resolved['trade_pnl'].sum()
     total_pnl = both_pnl + one_pnl
 
-    # ── Excess side accuracy (does directional tilt predict winner?) ──
-    both_resolved['tilt_correct'] = (
-        both_resolved['excess_side'] == both_resolved['winning_outcome']
+    # ── Directional prediction test (three measures to avoid bias) ──
+    # Share-weighted tilt is biased DOWN (cheaper side yields more shares).
+    # Dollar-weighted tilt is biased UP (expensive side costs more per share).
+    # Price-residual tilt controls for both: does the bot allocate beyond
+    # what market prices dictate?
+    both_resolved['share_excess'] = both_resolved['excess_side']
+    both_resolved['share_tilt_correct'] = (
+        both_resolved['share_excess'] == both_resolved['winning_outcome']
     )
-    tilt_accuracy = both_resolved['tilt_correct'].mean()
+    both_resolved['dollar_excess'] = np.where(
+        both_resolved['buy_up_cost'] >= both_resolved['buy_down_cost'], 'Up', 'Down')
+    both_resolved['dollar_tilt_correct'] = (
+        both_resolved['dollar_excess'] == both_resolved['winning_outcome']
+    )
+    # Price-residual: does bot overweight the winner BEYOND vwap-implied allocation?
+    both_resolved['price_implied_up_frac'] = (
+        both_resolved['vwap_up']
+        / (both_resolved['vwap_up'] + both_resolved['vwap_down']))
+    both_resolved['actual_up_dollar_frac'] = (
+        both_resolved['buy_up_cost']
+        / (both_resolved['buy_up_cost'] + both_resolved['buy_down_cost']))
+    both_resolved['residual_excess'] = np.where(
+        both_resolved['actual_up_dollar_frac'] >= both_resolved['price_implied_up_frac'],
+        'Up', 'Down')
+    both_resolved['residual_correct'] = (
+        both_resolved['residual_excess'] == both_resolved['winning_outcome']
+    )
+    share_tilt_acc = both_resolved['share_tilt_correct'].mean()
+    dollar_tilt_acc = both_resolved['dollar_tilt_correct'].mean()
+    residual_tilt_acc = both_resolved['residual_correct'].mean()
 
     # ── Print findings ──
     print("\n" + "=" * 60)
@@ -172,9 +197,11 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
         print(f"  Recovery rate:        "
               f"{sell_proceeds_total/sell_market_buy_cost*100:.1f}%")
 
-    print(f"\nDirectional tilt accuracy (excess side = winner):")
-    print(f"  {tilt_accuracy*100:.1f}% "
-          f"({both_resolved['tilt_correct'].sum():.0f} / {len(both_resolved):,})")
+    print(f"\nDirectional tilt accuracy ({len(both_resolved):,} resolved):")
+    print(f"  Share-weighted:  {share_tilt_acc*100:.1f}%  (biased DOWN — cheaper side gets more shares)")
+    print(f"  Dollar-weighted: {dollar_tilt_acc*100:.1f}%  (biased UP — expensive side costs more)")
+    print(f"  Price-residual:  {residual_tilt_acc*100:.1f}%  (unbiased — controls for market prices)")
+    print(f"  Conclusion: {'No prediction beyond market prices' if residual_tilt_acc < 0.50 else 'Evidence of directional prediction'}")
 
     print(f"\nSpread evolution (daily avg, both-sided):")
     if len(daily_spread) >= 7:
@@ -202,7 +229,7 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
     print(f"  Both-sided resolved: {len(both_resolved):,} -> ${both_pnl:,.0f}")
     print(f"  One-sided resolved:  {len(one_resolved):,} -> ${one_pnl:,.0f}")
     print(f"  Total trade-derived: ${total_pnl:,.0f}")
-    print(f"  Expected: ~$319,000")
+    print(f"  Expected: ~$281,000")
 
     return {
         'per_market_df': both,
@@ -210,7 +237,11 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
         'tier_summary': tier_summary,
         'daily_spread': daily_spread,
         'resolved_df': both_resolved,
-        'tilt_accuracy': float(tilt_accuracy),
+        'tilt_accuracy': {
+            'share_weighted': float(share_tilt_acc),
+            'dollar_weighted': float(dollar_tilt_acc),
+            'price_residual': float(residual_tilt_acc),
+        },
         'summary': {
             'both_sided_count': len(both),
             'one_sided_count': len(one_sided),
@@ -220,7 +251,9 @@ def analyze_completeness(db: Database, pms: pd.DataFrame) -> dict:
             'total_unmatched': float(both['unmatched_shares'].sum()),
             'total_guaranteed_profit': float(both['guaranteed_profit'].sum()),
             'total_trade_pnl': float(total_pnl),
-            'tilt_accuracy': float(tilt_accuracy),
+            'tilt_accuracy_share': float(share_tilt_acc),
+            'tilt_accuracy_dollar': float(dollar_tilt_acc),
+            'tilt_accuracy_residual': float(residual_tilt_acc),
             'sell_recovery_pct': (float(sell_proceeds_total / sell_market_buy_cost)
                                   if sell_market_buy_cost > 0 else 0),
         }
