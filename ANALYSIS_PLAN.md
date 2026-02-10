@@ -7,7 +7,8 @@ https://polymarket.com/@k9Q2mX4L8A7ZP3R
 - Profile shows "13,508 predictions" (market-level count) and "$86.8M volume" (double-counted or notional per Paradigm research)
 - 26,310 closed positions: 13,158 winners (cur_price=1) vs 13,152 losers (cur_price=0) — nearly perfect 50/50 resolution split
 - $40,704 in maker rebates across 34 daily payouts — significant revenue source
-- **Strategy (confirmed by Phase 3):** Pure completeness arbitrage on crypto 15-minute markets — buying both Up and Down outcomes at combined VWAP < $1.00 (~$0.929). **No directional model** — confirmed via: symmetric subset (n=701, z=-5.10 vs adjusted null), stratified permutation (p=1.0, observed gap below null), one-sided accuracy 42.7%, near-equal allocation (Up frac 0.4925). Captures only 29% of theoretical edge ($281K / $962K) due to execution imbalance on 5.13M unmatched shares. Active loss-cutting on deteriorating sides. Spreads expanding over time (+5.34¢). The engineering problem is execution balance, not price prediction.
+- **Strategy (confirmed by Phase 3):** Pure completeness arbitrage on crypto 15-minute and hourly markets — buying both Up and Down outcomes at combined VWAP < $1.00 (~$0.929). **No directional model** — confirmed via: symmetric subset (n=701, z=-5.10 vs adjusted null), stratified permutation (p=1.0, observed gap below null), one-sided accuracy 42.7%, near-equal allocation (Up frac 0.4925). Captures only 29% of theoretical edge ($281K / $962K) due to execution imbalance on 5.13M unmatched shares. Active loss-cutting on deteriorating sides. Spreads expanding over time (+5.34¢). The engineering problem is execution balance, not price prediction.
+- **Execution bottleneck (Phase 4):** Liquidity depth is the primary constraint (fill count r=+0.48 vs balance), not timing (seq gap r=-0.15) or entry speed (r=-0.10). BTC/ETH markets achieve 0.71 balance vs SOL/XRP 0.54. Entry speed median 8s. Bot scaling up +82% daily volume over 22 days. Peak concurrent exposure $292K. Well-balanced markets capture 59% of edge (+$159/market) vs very imbalanced -124% (-$23/market).
 
 ---
 
@@ -179,7 +180,7 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
   - **Daily capital deployment:** Total USDC deployed per day — is the bot scaling up, stable, or scaling down?
   - **Fill size patterns:** Distribution of individual fill sizes — constant, random, or strategic (e.g., larger early, smaller as liquidity thins)?
 
-**Verify:** Entry speed distribution should show most markets entered within first 1-2 minutes. Balance ratio distribution should cluster near 0.50 with a heavy tail toward imbalance (NOT directional conviction). Sequencing gap should correlate with balance ratio (the key execution bottleneck hypothesis). Edge capture efficiency should be highest in well-balanced markets and lowest in very-imbalanced ones.
+**Verify — CONFIRMED:** Entry speed median 8s (68% within 5-15s — much faster than predicted). Dollar balance ratio mean 0.49 (near-equal), balance ratio heavy-tailed toward imbalance (39.7% below 0.50). Sequencing gap weakly correlates with balance (r=-0.15), but **fill count is the primary driver (r=+0.48)** — liquidity depth, not timing, is the bottleneck. Edge capture: well-balanced 59%/+$159, very imbalanced -124%/-$23. BTC/ETH balance 0.71 vs SOL/XRP 0.54 (liquidity difference). Hourly 0.79 vs 15-min 0.63 (time advantage). Bot scaling up +82% daily volume over 22 days. Peak concurrent exposure $292K. Self-impact evidence: high-fill markets have 2.2x the price drift of low-fill markets.
 
 ---
 

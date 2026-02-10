@@ -284,3 +284,91 @@ class Database:
         """
         with self._get_conn() as conn:
             return pd.read_sql_query(query, conn)
+
+    def per_market_execution_detail(self) -> pd.DataFrame:
+        """Per-market execution timestamps by outcome. One row per market.
+
+        Adds per-outcome first/last buy timestamps, first sell timestamp,
+        and per-outcome buy fill counts for sequencing and entry speed analysis.
+        """
+        query = """
+        SELECT
+            condition_id,
+            MIN(CASE WHEN side='BUY' AND outcome='Up' THEN timestamp END) as first_buy_up_ts,
+            MAX(CASE WHEN side='BUY' AND outcome='Up' THEN timestamp END) as last_buy_up_ts,
+            MIN(CASE WHEN side='BUY' AND outcome='Down' THEN timestamp END) as first_buy_down_ts,
+            MAX(CASE WHEN side='BUY' AND outcome='Down' THEN timestamp END) as last_buy_down_ts,
+            MIN(CASE WHEN side='SELL' THEN timestamp END) as first_sell_ts,
+            MAX(CASE WHEN side='SELL' THEN timestamp END) as last_sell_ts,
+            SUM(CASE WHEN side='BUY' AND outcome='Up' THEN 1 ELSE 0 END) as buy_up_fills,
+            SUM(CASE WHEN side='BUY' AND outcome='Down' THEN 1 ELSE 0 END) as buy_down_fills,
+            SUM(CASE WHEN side='SELL' AND outcome='Up' THEN 1 ELSE 0 END) as sell_up_fills,
+            SUM(CASE WHEN side='SELL' AND outcome='Down' THEN 1 ELSE 0 END) as sell_down_fills
+        FROM trades WHERE activity_type = 'TRADE'
+        GROUP BY condition_id
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    def price_trajectory_summary(self) -> pd.DataFrame:
+        """Per-market per-outcome price trajectory: first-5 vs last-5 avg buy price.
+
+        Uses window functions. Returns ~16K rows (2 outcomes × ~8K markets).
+        """
+        query = """
+        WITH ranked AS (
+            SELECT
+                condition_id, outcome, price,
+                ROW_NUMBER() OVER (
+                    PARTITION BY condition_id, outcome
+                    ORDER BY timestamp, rowid
+                ) as rn_asc,
+                ROW_NUMBER() OVER (
+                    PARTITION BY condition_id, outcome
+                    ORDER BY timestamp DESC, rowid DESC
+                ) as rn_desc
+            FROM trades
+            WHERE activity_type = 'TRADE' AND side = 'BUY'
+        )
+        SELECT
+            condition_id,
+            outcome,
+            AVG(CASE WHEN rn_asc <= 5 THEN price END) as first_5_avg,
+            AVG(CASE WHEN rn_desc <= 5 THEN price END) as last_5_avg,
+            MIN(price) as min_price,
+            MAX(price) as max_price,
+            COUNT(*) as buy_fills
+        FROM ranked
+        GROUP BY condition_id, outcome
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)
+
+    def market_fills(self, condition_id: str) -> pd.DataFrame:
+        """All fills for a single market, ordered by timestamp."""
+        with self._get_conn() as conn:
+            return pd.read_sql_query(
+                """SELECT timestamp, side, outcome, price, size, usdc_value
+                   FROM trades
+                   WHERE condition_id = ? AND activity_type = 'TRADE'
+                   ORDER BY timestamp""",
+                conn,
+                params=(condition_id,),
+            )
+
+    def daily_summary(self) -> pd.DataFrame:
+        """Daily trade count, volume, and market count."""
+        query = """
+        SELECT
+            date(timestamp, 'unixepoch') as trade_date,
+            COUNT(*) as fills,
+            SUM(usdc_value) as volume,
+            COUNT(DISTINCT condition_id) as markets,
+            SUM(CASE WHEN side='BUY' THEN usdc_value ELSE 0 END) as buy_volume,
+            SUM(CASE WHEN side='SELL' THEN usdc_value ELSE 0 END) as sell_volume
+        FROM trades WHERE activity_type = 'TRADE'
+        GROUP BY date(timestamp, 'unixepoch')
+        ORDER BY trade_date
+        """
+        with self._get_conn() as conn:
+            return pd.read_sql_query(query, conn)

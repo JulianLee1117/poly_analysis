@@ -22,6 +22,14 @@
 18. **Permutation tests on allocation must be stratified by price.** Unstratified shuffle of outcome labels breaks the price-outcome correlation (expensive side wins ~83%), giving null mean ≈ 0 for dollar allocation gap — a false positive. Stratify by price_implied_up_frac (20 quantile bins) to preserve price-outcome link.
 15. **Spreads EXPANDED over 22 days** (+5.34¢). First week 4.3¢, last week 9.6¢. Opposite of expected competition-driven compression. Investigate in Phase 6.
 16. **When determining market resolution, use BOTH cur_price=0 and cur_price=1.** Using only cur_price=1 creates survivorship bias on one-sided markets (misses losers whose only position resolved to 0).
+19. **12% of markets are hourly, not 15-min.** 7,309 markets have "7:45AM-8:00AM" format (900s), 1,004 have "6PM" format (3600s). Market open = end_date minus duration. Use `_parse_market_duration()` in execution.py.
+20. **Fill count is the primary driver of balance quality** (r=+0.48, p≈0). Sequencing gap is weak (r=-0.15). Entry speed barely matters (r=-0.10). The execution bottleneck is liquidity depth, not timing.
+21. **BTC/ETH have better balance (0.71-0.72) than SOL/XRP (0.54-0.58).** Likely reflects order book depth differences. XRP worst at 0.54.
+22. **Hourly markets have better balance (0.79) than 15-min (0.63).** More time to accumulate both sides.
+23. **Markets with sells have BETTER balance (0.74 vs 0.60).** Sells improve balance indirectly — by cutting losers that often become the excess position. But sells don't specifically target the excess side (48.6%, near 50%).
+24. **Self-impact is real.** High-fill markets have 2.2x the absolute price drift of low-fill markets ($0.31 vs $0.14). Cannot attribute definitively without order book data, but the fill-count gradient is strong evidence.
+25. **Bot is scaling up over 22 days** (+82% daily buy volume, first week $569K → last week $1.03M). Peak concurrent exposure $292K, peak concurrent markets 113.
+26. **Edge capture efficiency is entirely determined by balance.** Well-balanced markets: 59% mean capture, +$159 avg P&L. Very imbalanced: -124% capture, -$23 avg P&L.
 
 ---
 
@@ -169,7 +177,87 @@ Before starting analysis, investigated three concerns and the order-book-data qu
 
 ---
 
-## Phase 4: Execution Microstructure — PENDING
+## Phase 4: Execution Microstructure — COMPLETE
+
+### Files created
+- `analyzers/execution.py` — sequencing, entry speed, price trajectory, sell patterns, balance correlations
+- `analyzers/sizing.py` — per-market capital, edge capture efficiency, concurrent exposure, daily deployment
+- `database.py` additions: `per_market_execution_detail()`, `price_trajectory_summary()`, `market_fills()`, `daily_summary()`
+
+### Key findings
+
+**Central question answered: What causes the 71% edge leakage?**
+The primary bottleneck is **liquidity depth** (available shares on each side), NOT timing or sequencing. Fill count has the strongest correlation with balance quality (r=+0.48). The bot can't always find enough shares on both sides, especially in SOL/XRP markets.
+
+**Sequencing (Up/Down buy order):**
+- First side: Up 50.6% / Down 49.4% — no systematic preference
+- Gap mean 75.2s, median 30s. 4.5% simultaneous, 39.4% moderate (10-60s)
+- Gap → balance: r=-0.15 (significant but weak). By tercile: fast 0.69, mid 0.67, slow 0.59
+- First side = excess side: 54.5% (barely above chance) — entering first only weakly predicts excess
+
+**Entry speed:**
+- Median 8 seconds from market open — very fast
+- 68.2% enter within 5-15 seconds
+- No difference between 15-min (8s) and hourly (9s) markets
+- Entry speed → balance: r=-0.10 (negligible)
+
+**Execution duration:**
+- Median 722s (12 min), mean 935s
+- 54.7% span 10-15 minutes — bot uses most of the 15-min window
+- Duration → balance: r=+0.42 (longer execution = better balance, because more fills)
+
+**Price trajectory:**
+- Up: first-5 avg $0.486 → last-5 $0.441 (drift -4.5¢)
+- Down: first-5 avg $0.484 → last-5 $0.464 (drift -2.0¢)
+- Self-impact proxy: high-fill markets have 2.2x the absolute drift of low-fill ($0.31 vs $0.14)
+- Intra-market price range: avg $0.43 per outcome — massive variance within each market window
+- Cannot attribute to self-impact vs organic movement without order book data
+
+**Sell execution:**
+- Sell delay: mean 219s (3.7 min), median 178s, at 33% of execution window
+- Up/Down sell split: balanced (74K up / 76K down fills)
+- Markets with sells have better balance (0.74 vs 0.60 without)
+- Sells don't target excess side specifically (48.6%) — improvement is indirect
+
+**Balance correlations (KEY — what drives edge capture):**
+| Feature | Spearman r | Interpretation |
+|---------|-----------|---------------|
+| Total fills | +0.48 | **Primary driver** — more liquidity consumed = better balance |
+| Exec duration | +0.42 | Longer execution = more fills = better balance |
+| Sequencing gap | -0.15 | Weak — faster switching helps a little |
+| Entry speed | -0.10 | Negligible — bot is already fast enough |
+
+**Balance by context:**
+| Context | Avg Balance | Interpretation |
+|---------|------------|---------------|
+| BTC/ETH | 0.71-0.72 | Deeper order books → better balance |
+| SOL/XRP | 0.54-0.58 | Thinner books → worse balance |
+| Hourly markets | 0.79 | More time to accumulate |
+| 15-min markets | 0.63 | Less time, worse balance |
+| Q4 fill count | 0.81 | High-fill markets well-balanced |
+| Q1 fill count | 0.47 | Low-fill markets very imbalanced |
+
+**Capital deployment:**
+- Per-market buy outlay: mean $2,291, median $1,146 (heavy-tailed)
+- Total buy outlay: $18.2M, sell recovery: $2.2M, net: $16.0M
+- Peak concurrent exposure: $292K, peak concurrent markets: 113
+- Daily buy volume increasing +82% over 22 days (scaling up)
+- Per-fill: mean $15.57 (small orders sweeping liquidity)
+
+**Edge capture efficiency by balance tier:**
+| Tier | Mean Capture | Avg P&L | n |
+|------|-------------|---------|---|
+| Well-balanced | 59% | +$159 | 2,186 |
+| Moderate | 51% | +$102 | 2,017 |
+| Imbalanced | -30% | -$5 | 652 |
+| Very imbalanced | -124% | -$23 | 795 |
+
+### Decisions made
+- **Used SQL-first approach throughout.** `per_market_execution_detail()` computes per-outcome timestamps via SQL GROUP BY. `price_trajectory_summary()` uses window functions for first-5/last-5 avg prices. No per-market loading needed for main analysis.
+- **Market duration parsed from question text** (15-min vs hourly). Market open = end_date - duration.
+- **Balance ratio correlations use Spearman** (rank-based, robust to outliers) instead of Pearson.
+- **Dropped formal "balance ratio prediction model"** from plan — simple correlations are sufficient and more interpretable.
+- **Deprioritized burst detection** — doesn't directly answer edge leakage question.
 
 ---
 
