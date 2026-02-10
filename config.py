@@ -15,8 +15,8 @@ RATE_LIMIT_REQUESTS_PER_SECOND = 5
 RATE_LIMIT_BURST = 10
 
 # Pagination
-PAGE_SIZE = 100
-MAX_OFFSET = 10000  # API hard limit — use timestamp windowing beyond this
+PAGE_SIZE = 1000  # API max — tested, returns up to 1000
+MAX_OFFSET = 3000  # API hard limit — use backward timestamp windowing beyond this
 
 # Retry / backoff
 MAX_RETRIES = 5
