@@ -123,3 +123,39 @@ class RateLimitedClient:
                 continue
 
         raise last_exception or RuntimeError(f"Failed after {config.MAX_RETRIES} retries: {url}")
+
+    def get_with_params_list(self, url: str, params: list) -> Any:
+        """GET request with params as list of (key, value) tuples.
+
+        Needed for array-style params like ?clob_token_ids=X&clob_token_ids=Y
+        which can't be expressed as a dict.
+        """
+        self._wait_for_token()
+
+        last_exception = None
+        for attempt in range(config.MAX_RETRIES):
+            try:
+                resp = self.session.get(url, params=params, timeout=30)
+
+                if resp.status_code == 429:
+                    wait = config.BACKOFF_BASE * (config.BACKOFF_FACTOR ** attempt)
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                return resp.json()
+
+            except requests.exceptions.HTTPError as e:
+                if resp.status_code in (500, 502, 503, 504):
+                    last_exception = e
+                    wait = config.BACKOFF_BASE * (config.BACKOFF_FACTOR ** attempt)
+                    time.sleep(wait)
+                    continue
+                raise
+            except requests.exceptions.RequestException as e:
+                last_exception = e
+                wait = config.BACKOFF_BASE * (config.BACKOFF_FACTOR ** attempt)
+                time.sleep(wait)
+                continue
+
+        raise last_exception or RuntimeError(f"Failed after {config.MAX_RETRIES} retries: {url}")

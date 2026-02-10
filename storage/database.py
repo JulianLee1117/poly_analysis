@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS markets (
     spread REAL DEFAULT 0.0,
     outcome_prices TEXT DEFAULT '',
     description TEXT DEFAULT '',
-    tokens TEXT DEFAULT ''
+    tokens TEXT DEFAULT '',
+    neg_risk INTEGER DEFAULT 0,
+    neg_risk_market_id TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS positions (
@@ -54,9 +56,18 @@ CREATE TABLE IF NOT EXISTS positions (
     outcome TEXT NOT NULL,
     size REAL NOT NULL,
     avg_price REAL DEFAULT 0.0,
+    total_bought REAL DEFAULT 0.0,
     realized_pnl REAL DEFAULT 0.0,
+    cur_price REAL DEFAULT 0.0,
     current_value REAL DEFAULT 0.0,
+    initial_value REAL DEFAULT 0.0,
+    cash_pnl REAL DEFAULT 0.0,
     is_closed INTEGER DEFAULT 0,
+    opposite_outcome TEXT DEFAULT '',
+    opposite_asset TEXT DEFAULT '',
+    end_date TEXT DEFAULT '',
+    close_timestamp INTEGER DEFAULT 0,
+    market_slug TEXT DEFAULT '',
     market_question TEXT DEFAULT ''
 );
 
@@ -115,13 +126,13 @@ class Database:
                 """INSERT OR REPLACE INTO markets
                    (condition_id, question, slug, category, end_date, created_at,
                     active, closed, volume, liquidity, spread, outcome_prices,
-                    description, tokens)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    description, tokens, neg_risk, neg_risk_market_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (m.condition_id, m.question, m.slug, m.category, m.end_date,
                      m.created_at, int(m.active), int(m.closed), m.volume,
                      m.liquidity, m.spread, m.outcome_prices, m.description,
-                     m.tokens)
+                     m.tokens, int(m.neg_risk), m.neg_risk_market_id)
                     for m in markets
                 ],
             )
@@ -132,13 +143,17 @@ class Database:
         with self._get_conn() as conn:
             conn.executemany(
                 """INSERT OR REPLACE INTO positions
-                   (asset, condition_id, outcome, size, avg_price,
-                    realized_pnl, current_value, is_closed, market_question)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (asset, condition_id, outcome, size, avg_price, total_bought,
+                    realized_pnl, cur_price, current_value, initial_value, cash_pnl,
+                    is_closed, opposite_outcome, opposite_asset, end_date,
+                    close_timestamp, market_slug, market_question)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (p.asset, p.condition_id, p.outcome, p.size, p.avg_price,
-                     p.realized_pnl, p.current_value, int(p.is_closed),
-                     p.market_question)
+                     p.total_bought, p.realized_pnl, p.cur_price, p.current_value,
+                     p.initial_value, p.cash_pnl, int(p.is_closed),
+                     p.opposite_outcome, p.opposite_asset, p.end_date,
+                     p.close_timestamp, p.market_slug, p.market_question)
                     for p in positions
                 ],
             )
@@ -211,3 +226,33 @@ class Database:
         with self._get_conn() as conn:
             row = conn.execute("SELECT COUNT(*) as cnt FROM positions").fetchone()
             return row["cnt"]
+
+    def trade_summary_stats(self) -> dict:
+        """Return summary stats for trades using SQL aggregation."""
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT
+                    SUM(usdc_value) as total_volume,
+                    date(MIN(timestamp), 'unixepoch') as min_date,
+                    date(MAX(timestamp), 'unixepoch') as max_date,
+                    CAST(julianday(date(MAX(timestamp), 'unixepoch'))
+                         - julianday(date(MIN(timestamp), 'unixepoch')) + 1 AS INTEGER) as days_active
+                FROM trades WHERE activity_type = 'TRADE'
+            """).fetchone()
+            return {
+                "total_volume": row["total_volume"] or 0,
+                "min_date": row["min_date"] or "",
+                "max_date": row["max_date"] or "",
+                "days_active": row["days_active"] or 0,
+            }
+
+    def get_asset_per_condition_id(self) -> dict:
+        """Return {condition_id: asset} mapping using one asset per condition_id.
+
+        Uses SQL aggregation to avoid loading 1.3M rows into memory.
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT condition_id, MIN(asset) as asset FROM trades GROUP BY condition_id"
+            ).fetchall()
+            return {row["condition_id"]: row["asset"] for row in rows}

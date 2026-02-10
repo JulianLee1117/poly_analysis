@@ -52,50 +52,41 @@ def run_collection(db: Database, wallet: str, skip_fetch: bool = False):
 
     # --- Market metadata ---
     print("\n[3/4] Collecting market metadata...")
-    all_trades_df = db.load_all_trades()
-    condition_ids = set(all_trades_df["condition_id"].unique()) if not all_trades_df.empty else set()
-    positions_df = db.load_positions()
-    if not positions_df.empty:
-        condition_ids.update(positions_df["condition_id"].unique())
+    # Get one asset (clob_token_id) per condition_id via SQL — avoids loading 1.3M rows
+    asset_map = db.get_asset_per_condition_id()
+    print(f"  Unique condition_ids with assets: {len(asset_map)}")
 
-    markets = collect_markets(client, condition_ids)
+    markets = collect_markets(client, asset_map)
     if markets:
         db.upsert_markets(markets)
     print(f"  Total markets in DB: {db.market_count()}")
 
     # --- Positions ---
     print("\n[4/4] Collecting positions...")
-    positions = collect_positions(client, wallet=wallet)
-    if positions:
-        db.upsert_positions(positions)
+    collect_positions(client, db, wallet=wallet)
     print(f"  Total positions in DB: {db.position_count()}")
 
 
 def print_summary(db: Database):
-    """Print a quick summary of collected data."""
-    trades_df = db.load_trades()
-    if trades_df.empty:
+    """Print a quick summary of collected data using SQL aggregation."""
+    trade_count = db.trade_count()
+    if trade_count == 0:
         print("\nNo trades found.")
         return
+
+    stats = db.trade_summary_stats()
 
     print("\n" + "=" * 60)
     print("DATA COLLECTION SUMMARY")
     print("=" * 60)
-    print(f"  Trades:          {len(trades_df):,}")
+    print(f"  Trades:          {trade_count:,}")
     print(f"  Maker rebates:   {db.trade_count('MAKER_REBATE'):,}")
     print(f"  Markets:         {db.market_count():,}")
     print(f"  Positions:       {db.position_count():,}")
-
-    total_volume = trades_df["usdc_value"].sum()
-    print(f"  Total volume:    ${total_volume:,.2f}")
-
-    min_dt = trades_df["datetime"].min()
-    max_dt = trades_df["datetime"].max()
-    print(f"  Date range:      {min_dt:%Y-%m-%d} to {max_dt:%Y-%m-%d}")
-
-    days_active = (max_dt - min_dt).days + 1
-    print(f"  Days active:     {days_active}")
-    print(f"  Avg trades/day:  {len(trades_df) / max(days_active, 1):,.1f}")
+    print(f"  Total volume:    ${stats['total_volume']:,.2f}")
+    print(f"  Date range:      {stats['min_date']} to {stats['max_date']}")
+    print(f"  Days active:     {stats['days_active']}")
+    print(f"  Avg trades/day:  {trade_count / max(stats['days_active'], 1):,.1f}")
     print("=" * 60)
 
 

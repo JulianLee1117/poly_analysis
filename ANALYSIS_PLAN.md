@@ -3,8 +3,10 @@
 ## Target
 **Account:** Uncommon-Oat (`0xd0d6053c3c37e727402d84c14069780d360993aa`)
 https://polymarket.com/@k9Q2mX4L8A7ZP3R
-- 1,323,832 fills across 8,313 markets (15-min crypto Up/Down) | $20.5M USDC volume | $698K profit | 22 days active (Jan 19 – Feb 10, 2026)
+- 1,323,832 fills across 8,313 markets (15-min crypto Up/Down) | $20.5M USDC volume | $713K realized P&L | 22 days active (Jan 19 – Feb 10, 2026)
 - Profile shows "13,508 predictions" (market-level count) and "$86.8M volume" (double-counted or notional per Paradigm research)
+- 26,310 closed positions: 13,158 winners (cur_price=1) vs 13,152 losers (cur_price=0) — nearly perfect 50/50 resolution split
+- $40,704 in maker rebates across 34 daily payouts — significant revenue source
 - **Strategy hypothesis:** Completeness arbitrage on crypto 15-minute markets — buying both Up and Down outcomes at combined VWAP < $1.00, with directional tilt toward predicted winner
 
 ---
@@ -27,7 +29,9 @@ https://polymarket.com/@k9Q2mX4L8A7ZP3R
 | Market duration | 88.2% under 15 min | Confirms 15-minute market windows |
 | Market start times | Cluster at :00, :15, :30, :45 | Aligned to standard 15-min crypto market intervals |
 | Hour-of-day peak | 10:00–19:00 UTC | US market hours bias — not 24/7 |
-| Maker rebates | ~34 (per original plan) | Overwhelmingly a taker (liquidity consumer), not a maker |
+| Maker rebates | 34 payouts, $40,704 total | Significant maker activity — $1,197/day avg rebate changes the taker-only assumption |
+| Closed positions | 26,310 (13,158 W / 13,152 L) | 50/50 win/loss on outcomes; P&L comes from spread, not direction |
+| Realized P&L | $713,043 (positions) | Ground truth from closed-positions API, includes all settled markets |
 | Sell pattern | Sells exist in 36.5% of markets | Position management — rebalancing or early exit, never sell-only |
 
 ---
@@ -43,36 +47,27 @@ Infrastructure is built and working. See `config.py`, `storage/`, `collectors/`,
 
 ---
 
-## Phase 2: Data Collection — MOSTLY COMPLETE
+## Phase 2: Data Collection — COMPLETE
 
-### Already collected:
+### Collected datasets:
 - **1,323,832 trades** — complete history, Jan 19 – Feb 10 2026, no gaps
-- Verified: consistent daily volumes ($300K–$1.7M/day), Jan 19 is wallet's first day
+- **8,313 markets** — metadata from Gamma API via `clob_token_ids` batches (75/batch, 111 API calls, ~55 sec)
+- **26,331 positions** — 21 open + 26,310 closed (paginated at 50/page, 527 API calls, ~2.5 min)
+- **34 maker rebates** — $40,704 total (single page)
+- **WAL checkpointed** — DB stabilized at 762 MB
 
-### Still needed (small, fast collections):
+### Key API learnings (documented for future use):
+- **Gamma API:** `condition_ids` param does NOT work for batch lookups. Must use `clob_token_ids` with array format (`?clob_token_ids=X&clob_token_ids=Y`). Default limit=20, can increase with `limit` param. URL length caps at ~75 tokens per batch.
+- **Closed positions:** Page size capped at 50 regardless of requested limit. Supports `offset` param with no upper limit. 26,310 total records for this wallet.
+- **Position schema expanded:** Added `total_bought`, `cur_price` (resolution: 0 or 1), `opposite_outcome`, `opposite_asset`, `end_date`, `close_timestamp`, `initial_value`, `cash_pnl` — critical for P&L analysis.
+- **Market schema expanded:** Added `neg_risk`, `neg_risk_market_id`.
 
-**[2a] Checkpoint the WAL journal:**
-```sql
-PRAGMA wal_checkpoint(TRUNCATE);
-```
-Reclaims the 71MB WAL file and stabilizes the 773MB database.
-
-**[2b] Collect market metadata** (~8,313 condition_ids):
-- Batch via Gamma API: `GET /markets?condition_ids={batch}` with `MARKET_BATCH_SIZE=20`
-- ~416 API calls at 5/sec ≈ 83 seconds
-- **Critical fields needed for analysis:** `question` (confirm crypto type — BTC/ETH/SOL), `endDate` (confirm 15-min duration), `created_at` (entry timing vs market creation), `category`, `negRisk`, `volume`/`liquidity` (market context)
-
-**[2c] Collect positions** (open + closed):
-- `GET /positions?user={wallet}` — current open positions with `currentValue`, `cashPnl`
-- `GET /closed-positions?user={wallet}` — closed positions with `realizedPnl` for P&L cross-validation
-- Single API call each, small datasets
-
-**[2d] Collect MAKER_REBATE activity:**
-- `GET /activity?user={wallet}&type=MAKER_REBATE`
-- Expected ~34 records (single page, no pagination)
-- Confirms taker-dominant execution
-
-**Verify:** Market count matches ~8,313 condition_ids from trades. Market questions confirm crypto 15-min format (e.g., "Will BTC go up or down between 14:00 and 14:15 UTC?"). Closed positions provide P&L ground truth.
+### Verification results:
+- Market coverage: 8,313/8,314 condition_ids found (1 missing from Gamma — negligible)
+- Market questions confirm format: "Solana Up or Down - January 19, 7:45AM-8:00AM ET"
+- Realized P&L from positions: **$713,043** (ground truth)
+- Resolution split: 13,158 winners (cur_price=1) vs 13,152 losers (cur_price=0) — 50.01%
+- Position condition_ids: 13,543 (more than 8,314 in trades — bot has older positions pre-dating our trade window)
 
 ---
 
@@ -103,7 +98,7 @@ Reclaims the 71MB WAL file and stabilizes the 773MB database.
   - **Evolution over time:** Is the average spread improving, degrading, or stable across the 22-day window? (competition signal)
   - **All SQL-based:** Use a CTE that computes per-condition_id aggregates, return summary DataFrame
 
-**Verify:** Average combined VWAP should be ~$0.9287 (pre-computed). Spread distribution should show a tight cluster around 7%. Cross-check: total_matched_shares × avg_spread ≈ rough profit estimate, compare to $698K.
+**Verify:** Average combined VWAP should be ~$0.9287 (pre-computed). Spread distribution should show a tight cluster around 7%. Cross-check: total_matched_shares × avg_spread ≈ rough profit estimate, compare to $713K.
 
 ---
 
@@ -139,7 +134,7 @@ Reclaims the 71MB WAL file and stabilizes the 773MB database.
 
 ## Phase 5: P&L and Performance Analysis
 
-**Goal:** Decompose where the bot's $698K profit comes from and measure the quality of its edge.
+**Goal:** Decompose where the bot's $713K profit comes from and measure the quality of its edge.
 
 **Files to create:**
 - `analyzers/pnl.py` — Profit & loss decomposition:
@@ -147,8 +142,9 @@ Reclaims the 71MB WAL file and stabilizes the 773MB database.
     - Total buy cost (Up + Down), total sell proceeds
     - Net shares held at resolution: up_shares_net, down_shares_net (buys - sells per outcome)
     - Resolution P&L: winning_shares × $1.00 + losing_shares × $0.00 - total_cost + sell_proceeds
-    - **Cannot compute resolution P&L from trade data alone** — need `curPrice` from closed positions or market resolution status
-    - **Approach:** Cross-reference with `/closed-positions` `realizedPnl` field as ground truth per condition_id
+    - **Resolution price now available:** `cur_price` field in positions table (1=won, 0=lost)
+    - **Ground truth available:** `realized_pnl` per position from closed-positions API ($713K total)
+    - **Cross-validate:** Computed P&L from trades should match `realized_pnl` from positions
   - **P&L decomposition into three components:**
     1. **Completeness spread:** matched_shares × (1.00 - combined_VWAP) — the guaranteed arb profit
     2. **Directional P&L:** unmatched_shares × (resolution_price - entry_price) — the speculative component (win or lose)
@@ -169,7 +165,7 @@ Reclaims the 71MB WAL file and stabilizes the 773MB database.
   - **Tail risk:** Worst 5% of market-level outcomes
   - **Capital efficiency:** Profit / average capital deployed
 
-**Verify:** Sum of per-market P&L should approximate $698K (from profile). Completeness spread component should account for the majority of profit. Directional component should be positive but smaller (edge in direction prediction). Win rate should be high (>80%) if completeness arb dominates.
+**Verify:** Sum of per-market P&L should match $713K (from positions ground truth). Completeness spread component should account for the majority of profit. Directional component should be positive but smaller (edge in direction prediction). Win rate should be high (>80%) if completeness arb dominates. Maker rebates ($40.7K) are an additional revenue source to include.
 
 ---
 
@@ -253,13 +249,13 @@ Reclaims the 71MB WAL file and stabilizes the 773MB database.
   - **Section 3: Completeness Arbitrage** — spread analysis, matched vs unmatched shares
   - **Section 4: Execution Microstructure** — fill patterns, entry speed, slippage
   - **Section 5: Directional Edge** — tilt analysis, accuracy, one-sided markets
-  - **Section 6: P&L Decomposition** — where the $698K comes from
+  - **Section 6: P&L Decomposition** — where the $713K comes from
   - **Section 7: Risk & Performance** — Sharpe, drawdown, win rate, capital efficiency
   - **Section 8: Bot Signature & Replication** — fingerprint, edge sustainability, capital requirements
 
 - `main.py` (complete) — Full pipeline: `--skip-fetch` to skip collection, `--wallet` to change target, runs collection → analysis → synthesis → report
 
-**Verify:** Open `output/report.html` in browser. All charts render. Findings are internally consistent. P&L decomposition sums to profile's $698K. Strategy conclusion is supported by quantitative evidence.
+**Verify:** Open `output/report.html` in browser. All charts render. Findings are internally consistent. P&L decomposition sums to $713K (positions ground truth). Maker rebates ($40.7K) accounted for. Strategy conclusion is supported by quantitative evidence.
 
 ---
 
@@ -282,12 +278,12 @@ All analyzers must handle 1.3M trades without loading the full dataset into memo
 | Dataset | Status | Records | Notes |
 |---------|--------|---------|-------|
 | Trades (TRADE) | COMPLETE | 1,323,832 | Full history Jan 19 – Feb 10 |
-| Market metadata | NEEDED | ~8,313 expected | ~416 API calls, ~83 sec |
-| Open positions | NEEDED | Unknown | Single API call |
-| Closed positions | NEEDED | Unknown | Single API call, has P&L ground truth |
-| Maker rebates | NEEDED | ~34 expected | Single API call |
+| Market metadata | COMPLETE | 8,313 | Via Gamma API `clob_token_ids` batches |
+| Open positions | COMPLETE | 21 | Currently active positions |
+| Closed positions | COMPLETE | 26,310 | P&L ground truth: $713K realized |
+| Maker rebates | COMPLETE | 34 | $40,704 total rebates |
 
-**No additional trade data needed.** The 22-day window with 1.3M fills across 8,313 markets is comprehensive. Market metadata is the critical missing piece — needed for crypto asset identification and market timing analysis.
+**All data collected.** Database: 762 MB, WAL checkpointed. Ready for Phase 3 analysis.
 
 ---
 
@@ -299,9 +295,9 @@ All analyzers must handle 1.3M trades without loading the full dataset into memo
 | `GET /activity?user={wallet}&type=MAKER_REBATE` | `data-api.polymarket.com` | Maker detection |
 | `GET /positions?user={wallet}` | `data-api.polymarket.com` | Open positions |
 | `GET /closed-positions?user={wallet}` | `data-api.polymarket.com` | Closed positions + P&L ground truth |
-| `GET /markets?condition_ids={batch}` | `gamma-api.polymarket.com` | Market metadata |
+| `GET /markets?clob_token_ids=X&clob_token_ids=Y` | `gamma-api.polymarket.com` | Market metadata (array format, max ~75/batch) |
 
-**Pagination:** No pagination metadata in responses. Detect end-of-data by `len(results) < limit`. **Offset maxes at 3,000** (not 10K). Supports `start` (inclusive `>=`) and `end` (inclusive `<=`) timestamp params. Results are newest-first. Use backward timestamp windowing beyond 3K records.
+**Pagination:** No pagination metadata in responses. Detect end-of-data by `len(results) < limit`. Activity endpoint offset maxes at 3,000 — use backward timestamp windowing beyond that. Closed-positions caps at 50/page regardless of requested limit, but offset has no upper limit. Gamma API default limit=20, increase with `limit` param; URL length constrains batch size to ~75 tokens.
 
 **Response format:** All endpoints return bare JSON arrays. Field names are camelCase. Data API numeric fields are actual JSON numbers. Gamma API returns `volume`/`liquidity`/`id` as strings (use `volumeNum`/`liquidityNum` instead). Gamma `outcomePrices`/`clobTokenIds`/`outcomes` are double-encoded JSON strings requiring `json.loads()`.
 

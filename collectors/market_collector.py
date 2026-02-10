@@ -1,13 +1,17 @@
 """Collect market metadata from the Gamma API for all traded condition IDs."""
 
 import json
-from typing import List, Set
+from typing import Dict, List, Set
 
 from tqdm import tqdm
 
 import config
 from collectors.api_client import RateLimitedClient
 from storage.models import Market
+
+# Gamma API returns max 20 by default; with limit param we can get more.
+# URL length caps out around batch=75 (token IDs are ~77 chars each).
+GAMMA_BATCH_SIZE = 75
 
 
 def _parse_market(raw: dict) -> Market:
@@ -42,32 +46,40 @@ def _parse_market(raw: dict) -> Market:
         outcome_prices=json.dumps(outcome_prices_raw) if outcome_prices_raw else "",
         description=raw.get("description", ""),
         tokens=json.dumps(tokens_raw) if tokens_raw else "",
+        neg_risk=bool(raw.get("negRisk", False)),
+        neg_risk_market_id=raw.get("negRiskMarketId", ""),
     )
 
 
 def collect_markets(
     client: RateLimitedClient,
-    condition_ids: Set[str],
+    asset_map: Dict[str, str],
 ) -> List[Market]:
-    """Batch-fetch market metadata from Gamma API.
+    """Batch-fetch market metadata from Gamma API using clob_token_ids.
 
     Args:
         client: Rate-limited HTTP client.
-        condition_ids: Set of condition IDs to look up.
+        asset_map: {condition_id: asset} mapping — one token per market.
     """
     base_url = f"{config.GAMMA_API_BASE}/markets"
-    batch_size = config.MARKET_BATCH_SIZE
 
-    # Remove empty strings
-    ids = sorted(cid for cid in condition_ids if cid)
+    # Sort assets for deterministic ordering
+    assets = sorted(a for a in asset_map.values() if a)
     all_markets: List[Market] = []
     seen_ids: Set[str] = set()
 
-    batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
+    batches = [assets[i:i + GAMMA_BATCH_SIZE] for i in range(0, len(assets), GAMMA_BATCH_SIZE)]
 
     for batch in tqdm(batches, desc="Fetching markets", unit=" batch"):
-        params = {"condition_ids": ",".join(batch)}
-        data = client.get(base_url, params=params)
+        # Use array format: ?clob_token_ids=X&clob_token_ids=Y
+        params = [("clob_token_ids", a) for a in batch]
+        params.append(("limit", len(batch) + 10))  # safety margin
+
+        try:
+            data = client.get_with_params_list(base_url, params=params)
+        except Exception as e:
+            print(f"  Warning: batch failed ({e}), skipping {len(batch)} tokens")
+            continue
 
         if not isinstance(data, list):
             continue
@@ -78,5 +90,8 @@ def collect_markets(
                 seen_ids.add(cid)
                 all_markets.append(_parse_market(raw))
 
-    print(f"  Collected {len(all_markets)} markets from {len(ids)} condition IDs")
+    print(f"  Collected {len(all_markets)} markets from {len(assets)} token lookups")
+    missing = set(asset_map.keys()) - seen_ids
+    if missing:
+        print(f"  Warning: {len(missing)} condition_ids not found in Gamma API")
     return all_markets
